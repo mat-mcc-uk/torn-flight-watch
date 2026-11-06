@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Flight Watch
 // @namespace    mcc.torn.ukwatch
-// @version      1.9.0
+// @version      1.10.0
 // @description  Watches the factions you're at war with, shows which countries are safe or risky, and alerts when enemies fly to, land in, or leave the country you're in or heading to.
 // @author       Ripcorder [4252513]
 // @match        https://www.torn.com/*
@@ -13,6 +13,7 @@
 // @connect      discordapp.com
 // @connect      supabase.co
 // @connect      lwqcyivwyebhnqwubhuy.supabase.co
+// @connect      ffscouter.com
 // @run-at       document-idle
 // @homepageURL  https://github.com/mat-mcc-uk/torn-flight-watch
 // @updateURL    https://raw.githubusercontent.com/mat-mcc-uk/torn-flight-watch/main/torn-flight-watch.user.js
@@ -58,7 +59,9 @@
     alertLanded: true,
     alertLeave: false,
     alertArrive: true,         // summary of a country's risk when you start heading there
-    showMates: true,           // list faction mates flying into danger, with a Warn button
+    showMates: true,
+    ffKey: '',                 // FFScouter key for battle stat estimates; blank = use the Torn API key
+    showStats: true,           // list faction mates flying into danger, with a Warn button
     serverToken: '',           // leave blank to use the built-in token; paste a new one here after a rotation
   };
 
@@ -69,7 +72,7 @@
   const SERVER_KEY = 'sb_publishable_TZNmF4f4b2bWSC5zuUCqLQ_f5c3EYQf'; // publishable, safe to ship
   const SERVER_TOKEN = '6d975e385dde1a96370823b2';
 
-  const VERSION = '1.9.0'; // keep in step with @version so the panel shows what's actually running
+  const VERSION = '1.10.0'; // keep in step with @version so the panel shows what's actually running
   const TAB_ID = Math.random().toString(36).slice(2);
   const LEADER_TTL = 20;   // seconds before another tab takes over polling
   const WAR_CHECK = 300;   // seconds between war lookups in auto enemy mode
@@ -439,6 +442,77 @@
     setMeta(Object.assign(getMeta(), { enemies, warNote: enemies.length ? '' : 'Not at war right now' }));
   }
 
+  // ---------- FFScouter battle stat estimates ----------
+  // https://ffscouter.com/api/v1/get-stats?key=KEY&targets=1,2,3 returns, per player,
+  // bs_estimate_human (e.g. "2.99b") and fair_fight. The key is a Torn API key registered at
+  // ffscouter.com. Estimates change slowly, so each player is looked up at most every 6 hours,
+  // and only enemies who are away from Torn are looked up at all.
+  const FF_TTL = 6 * 3600;
+  const FF_RETRY = 600; // don't retry a failed lookup for 10 minutes
+  const ffTried = {};
+  let ffError = '';
+  function getJSON(url) {
+    const parse = (status, text) => {
+      if (text && typeof text === 'object') return { status, json: text };
+      let j = null;
+      try { j = JSON.parse(text); } catch (e) {}
+      return { status, json: j };
+    };
+    if (!IS_PDA && typeof GM_xmlhttpRequest === 'function') {
+      return new Promise((resolve, reject) => {
+        GM_xmlhttpRequest({
+          method: 'GET', url, timeout: REQ_TIMEOUT,
+          onload: (r) => resolve(parse(r.status, r.responseText)),
+          onerror: () => reject(new Error('request failed')),
+          ontimeout: () => reject(new Error('timed out')),
+        });
+      });
+    }
+    const get = IS_PDA ? pdaGetter() : null;
+    if (get) return Promise.resolve(get(url, {})).then((r) => parse(Number((r && r.status) || 0), r && r.responseText));
+    return timedFetch(url).then((r) => r.text().then((txt) => parse(r.status, txt)));
+  }
+  const ffCache = () => store.get('fw_ffs', {}) || {};
+  const ffFor = (id) => ffCache()[String(id)] || null;
+  async function refreshFF(cfg, ids) {
+    const key = cfg.ffKey || cfg.apiKey;
+    if (!cfg.showStats || !key || !ids.length) return;
+    const t = now();
+    const cache = ffCache();
+    const need = ids.map(String).filter((id) => {
+      const c = cache[id];
+      return (!c || t - c.at > FF_TTL) && !(ffTried[id] && t - ffTried[id] < FF_RETRY);
+    });
+    if (!need.length) return;
+    need.forEach((id) => (ffTried[id] = t));
+    try {
+      for (let i = 0; i < need.length; i += 50) {
+        const batch = need.slice(i, i + 50);
+        const { status, json } = await getJSON(`https://ffscouter.com/api/v1/get-stats?key=${encodeURIComponent(key)}&targets=${batch.join(',')}`);
+        if (!Array.isArray(json)) {
+          const msg = (json && (json.error || json.message)) || `HTTP ${status}`;
+          ffError = json && json.code === 6 ? 'key not registered at ffscouter.com' : String(msg);
+          return;
+        }
+        for (const r of json) {
+          if (r && r.player_id != null) {
+            cache[String(r.player_id)] = { h: r.bs_estimate_human || null, ff: r.fair_fight != null ? r.fair_fight : null, at: t };
+          }
+        }
+      }
+      // Keep the cache small: drop entries older than a day.
+      for (const id of Object.keys(cache)) if (t - cache[id].at > 86400) delete cache[id];
+      store.set('fw_ffs', cache);
+      ffError = '';
+    } catch (e) {
+      ffError = (e && e.message) || 'lookup failed';
+    }
+  }
+  const statsLabel = (id) => {
+    const c = ffFor(id);
+    return c && c.h ? `~${c.h}` : '';
+  };
+
   // ---------- Poll ----------
   let lastPoll = 0;
   let lastError = '';
@@ -677,6 +751,8 @@
       }
       state._init = true;
       setState(state);
+      // Battle stat estimates for enemies who are away (not awaited, so the poll stays quick).
+      refreshFF(cfg, Object.keys(state).filter((id) => !id.startsWith('_')));
 
       // You just started heading to (or landed in) a new country: say how risky it is.
       if (myDest && myDest !== prevDest && cfg.alertArrive && !firstRun) {
@@ -824,6 +900,7 @@
         <div>Warn before landing (min)<input type="number" min="1" data-k="warnMin" value="${c.warnMin}"></div>
       </div>
       Discord webhook (optional)<input type="text" data-k="webhook" value="${esc(c.webhook)}">
+      FFScouter key (blank = your Torn key; it must be registered at ffscouter.com)<input type="text" data-k="ffKey" value="${esc(c.ffKey)}">
       Server token override (leave blank to use the built-in one)<input type="text" data-k="serverToken" value="${esc(c.serverToken)}">
       <div class="muted" style="margin:4px 0">Alerts cover the country you're in or flying to:</div>
       ${chk('alertArrive', 'Safe/risky summary when you head somewhere')}
@@ -832,11 +909,13 @@
       ${chk('alertLanded', 'Enemy landed')}
       ${chk('alertLeave', 'Enemy leaves your country')}
       ${chk('showMates', 'Show faction mates in danger')}
+      ${chk('showStats', 'Show FFScouter battle stat estimates')}
       <button id="ukw-save">Save</button> <button id="ukw-test">Test alert</button></div>`;
   }
 
   function memberRow(id, r, t, multi) {
-    const link = `<a href="https://www.torn.com/profiles.php?XID=${id}" target="_blank">${esc(r.name)}</a> <span class="muted">${r.level}${multi && r.faction ? ` · ${esc(r.faction)}` : ''}</span>`;
+    const est = statsLabel(id);
+    const link = `<a href="https://www.torn.com/profiles.php?XID=${id}" target="_blank">${esc(r.name)}</a> <span class="muted">${r.level}${est ? ` · <span title="FFScouter battle stat estimate">${esc(est)}</span>` : ''}${multi && r.faction ? ` · ${esc(r.faction)}` : ''}</span>`;
     if (r.kind === 'out') {
       const eta = r.eta ? `${fmt(r.eta - t)}${r.fromServer ? ' <span class="muted" title="Takeoff time from the server">(srv)</span>' : ''}` : '<span class="muted">ETA unknown</span>';
       const biz = r.bizEta ? `<br><span class="muted">business: ${fmt(r.bizEta - t)}</span>` : '';
@@ -858,6 +937,7 @@
     if (sv && sv.ok && !sv.note) {
       h += `<div class="muted">Server data: ${sv.away || 0} enemies away, ${sv.enemies || 0} faction(s), ${(meta.friends || []).length} faction mates away, ${Math.max(0, sv.at - sv.lastPoll)}s old${sv.cached ? ' (saved copy)' : ''}</div>`;
     }
+    h += `<div class="muted">FFScouter: ${!getCfg().showStats ? 'off' : ffError ? `<span class="err">${esc(ffError)}</span>` : `${Object.keys(ffCache()).length} estimate(s) cached`}</div>`;
     h += `<div class="muted">Enemy data from: ${d.source === 'server' ? 'server (your key only checks your own status)' : 'Torn API directly'}</div>`;
     (d.factions || []).forEach((f) => (h += `<div class="muted">${esc(f.name)} [${esc(f.id)}]: ${f.count} ${f.away ? 'away from Torn' : 'members fetched'}</div>`));
     const rows = Object.entries(state).filter(([id, r]) => !id.startsWith('_') && String(r.rawState).toLowerCase() !== 'okay');
@@ -888,9 +968,20 @@
       f.kind === 'there' ? `You're in ${f.country} now`
       : f.eta ? `You land in ${f.country} in about ${fmt(f.eta - t)}`
       : `You're flying to ${f.country}`;
-    const firstEnemy = b.inbound.find(([, r]) => r.eta);
-    const enemyEta = firstEnemy ? ` First enemy lands in about ${fmt(firstEnemy[1].eta - t)}.` : '';
-    return `Heads up from Flight Watch: ${f.country} is risky. Enemies: ${boardLine(b)}.${enemyEta} ${when}. Stay safe!`;
+    // Name each enemy with its FFScouter estimate; cap the list so the message stays readable.
+    const who = ([id, r]) => {
+      const est = statsLabel(id);
+      return `${r.name}${est ? ` (${est})` : ''}`;
+    };
+    const lines = [];
+    const there = [...b.there, ...b.hosp];
+    if (there.length) {
+      lines.push(`In ${f.country} now: ${there.slice(0, 6).map(([id, r]) => `${who([id, r])}${r.hosp ? ' in hospital' : ''}`).join(', ')}${there.length > 6 ? ` and ${there.length - 6} more` : ''}.`);
+    }
+    if (b.inbound.length) {
+      lines.push(`On the way: ${b.inbound.slice(0, 6).map(([id, r]) => `${who([id, r])}${r.eta ? `, lands in about ${fmt(r.eta - t)}` : ''}`).join('; ')}${b.inbound.length > 6 ? `; and ${b.inbound.length - 6} more` : ''}.`);
+    }
+    return `Heads up from Flight Watch: ${f.country} is risky. ${lines.join(' ')} ${when}. Stay safe!`;
   }
   // Copy the warning, then open Torn's message composer for that player. The human presses send:
   // Torn's rules don't allow scripts to send messages on their own.
@@ -1107,19 +1198,32 @@
     const sel = 'input[name="subject"], input#subject, input[name*="subject" i], input[placeholder*="subject" i], input[aria-label*="subject" i]';
     return [...document.querySelectorAll(sel)].find(visible) || null;
   }
-  function findBody() {
-    const ta = [...document.querySelectorAll('textarea')].find((x) => visible(x) && x.id !== 'ukw-fw-ta');
-    if (ta) return { el: ta, kind: 'textarea' };
-    const ce = [...document.querySelectorAll('[contenteditable="true"], [contenteditable=""]')].find((x) => visible(x) && !x.closest('#ukw-panel'));
-    if (ce) return { el: ce, kind: 'editable' };
-    // Rich editors that live in an iframe (TinyMCE and similar).
-    for (const f of document.querySelectorAll('iframe')) {
+  // Look for the message box near the subject field, so Torn's chat box (also a visible textarea on
+  // every page) is never picked by mistake. Rich-text editors are checked before plain textareas.
+  const inChat = (el) => !!el.closest('[class*="chat" i], [id*="chat" i], #ukw-panel');
+  function editorIn(root) {
+    for (const f of root.querySelectorAll('iframe')) {
       try {
         const b = f.contentDocument && f.contentDocument.body;
-        if (b && b.isContentEditable && visible(f)) return { el: b, kind: 'editable' };
+        if (b && (b.isContentEditable || f.contentDocument.designMode === 'on') && visible(f)) return { el: b, kind: 'editable' };
       } catch (e) {}
     }
+    const ce = [...root.querySelectorAll('[contenteditable="true"], [contenteditable=""]')].find((x) => visible(x) && !inChat(x));
+    if (ce) return { el: ce, kind: 'editable' };
+    const ta = [...root.querySelectorAll('textarea')].find((x) => visible(x) && !inChat(x));
+    if (ta) return { el: ta, kind: 'textarea' };
     return null;
+  }
+  function findBody(subj) {
+    // Walk up from the subject field until a container also holds a message box.
+    if (subj) {
+      let node = subj.parentElement;
+      for (let i = 0; node && i < 8; i++, node = node.parentElement) {
+        const hit = editorIn(node);
+        if (hit) return hit;
+      }
+    }
+    return editorIn(document);
   }
   let prefillRunning = false;
   function prefillCompose() {
@@ -1131,10 +1235,10 @@
     prefillRunning = true;
     const started = Date.now();
     const timer = setInterval(() => {
-      const body = findBody();
+      const subj = findSubject();
+      const body = findBody(subj);
       if (body) {
         clearInterval(timer);
-        const subj = findSubject();
         if (subj && p.subject && !subj.value) setFieldValue(subj, p.subject);
         if (body.kind === 'textarea') setFieldValue(body.el, p.body);
         else setEditable(body.el, p.body);
