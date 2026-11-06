@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Flight Watch
 // @namespace    mcc.torn.ukwatch
-// @version      1.6.3
+// @version      1.6.4
 // @description  Watches the factions you're at war with, shows which countries are safe or risky, and alerts when enemies fly to, land in, or leave the country you're in or heading to.
 // @author       Ripcorder [4252513]
 // @match        https://www.torn.com/*
@@ -68,7 +68,7 @@
   const SERVER_KEY = 'sb_publishable_TZNmF4f4b2bWSC5zuUCqLQ_f5c3EYQf'; // publishable, safe to ship
   const SERVER_TOKEN = '6d975e385dde1a96370823b2';
 
-  const VERSION = '1.6.3'; // keep in step with @version so the panel shows what's actually running
+  const VERSION = '1.6.4'; // keep in step with @version so the panel shows what's actually running
   const TAB_ID = Math.random().toString(36).slice(2);
   const LEADER_TTL = 20;   // seconds before another tab takes over polling
   const WAR_CHECK = 300;   // seconds between war lookups in auto enemy mode
@@ -86,8 +86,14 @@
       return false;
     }
   })();
+  // If a save fails (torn.com's localStorage is shared with Torn and every other script, and can
+  // fill up), keep the value in memory so this tab still works, and report it in Raw statuses.
+  // Before this, a failed save was silent and the board kept showing the last copy that fit.
+  const mem = {};
+  let storeError = '';
   const store = {
     get(k, d) {
+      if (k in mem) return mem[k];
       if (useGM) return GM_getValue(k, d);
       try {
         const v = localStorage.getItem(`fw:${k}`);
@@ -97,8 +103,15 @@
       }
     },
     set(k, v) {
-      if (useGM) return GM_setValue(k, v);
-      try { localStorage.setItem(`fw:${k}`, JSON.stringify(v)); } catch (e) {}
+      try {
+        if (useGM) GM_setValue(k, v);
+        else localStorage.setItem(`fw:${k}`, JSON.stringify(v));
+        delete mem[k];
+        if (storeError.startsWith(`${k}:`)) storeError = '';
+      } catch (e) {
+        mem[k] = v;
+        storeError = `${k}: ${(e && e.name) || 'save failed'}`;
+      }
     },
   };
 
@@ -518,10 +531,12 @@
       const prevDest = meta.myDest;
       const state = getState();
       const firstRun = !state._init;
-      // Switching between server and Torn data: the server list leaves out people in Torn, so a
-      // missing record means "was in Torn", not "never seen".
+      // Only people away from Torn are kept (that keeps the saved state small), so a missing record
+      // means "was in Torn at the last poll". That only holds if the last poll used the same source.
       const prevSource = state._source;
+      const prevPollAt = state._lastPoll || 0;
       state._source = debug.source;
+      state._lastPoll = t;
       const seen = new Set();
 
       for (const o of obs) {
@@ -531,8 +546,8 @@
         const old = state[id];
         const prev = old
           ? { key: old.key, kind: old.kind, country: old.country, seenAt: old.seenAt }
-          : !firstRun && prevSource === debug.source && debug.source === 'server'
-            ? { key: 'torn:', kind: 'torn', country: null, seenAt: t - cfg.pollSec }
+          : !firstRun && prevSource === debug.source
+            ? { key: 'torn:', kind: 'torn', country: null, seenAt: prevPollAt || t - cfg.pollSec }
             : null;
         const rec = old || { key, departAt: null, warned: false };
         rec.name = o.name;
@@ -599,7 +614,8 @@
 
         rec.key = key;
         rec.seenAt = t;
-        state[id] = rec;
+        if (loc.kind === 'torn') delete state[id];
+        else state[id] = rec;
       }
 
       // Drop anyone not reported this time: left the faction, faction no longer watched, or (server
@@ -607,7 +623,7 @@
       // about flights towards you.
       for (const id of Object.keys(state)) {
         if (id.startsWith('_')) continue;
-        if (!seen.has(id)) delete state[id];
+        if (!seen.has(id) || state[id].kind === 'torn') delete state[id];
       }
       state._init = true;
       setState(state);
@@ -725,6 +741,7 @@
     const d = meta.debug || {};
     let h = `<h4>Raw statuses</h4>`;
     h += `<div class="muted">Storage: ${useGM ? 'Tampermonkey' : 'localStorage'}${IS_PDA ? ' (PDA)' : ''}. Last poll: ${d.at ? `${t - d.at}s ago` : 'never'}</div>`;
+    if (storeError) h += `<div class="err">Saving failed (${esc(storeError)}). Working from memory in this tab.</div>`;
     h += `<div class="muted">You: ${esc(meta.myRaw || 'unknown')}</div>`;
     const sv = meta.server;
     h += `<div class="muted">Server: ${!sv ? 'no reply yet' : !sv.ok ? `<span class="err">${esc(sv.error)}</span>` : sv.note ? esc(sv.note) : `OK, last enemy poll ${Math.max(0, sv.at - sv.lastPoll)}s before your last check`}</div>`;
