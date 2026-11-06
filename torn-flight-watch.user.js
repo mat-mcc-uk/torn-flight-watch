@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Flight Watch
 // @namespace    mcc.torn.ukwatch
-// @version      1.5.2
+// @version      1.5.3
 // @description  Watches the factions you're at war with, shows which countries are safe or risky, and alerts when enemies fly to, land in, or leave the country you're in or heading to.
 // @author       Ripcorder [4252513]
 // @match        https://www.torn.com/*
@@ -237,14 +237,32 @@
   // A plain fetch() to Supabase from torn.com fails ("Failed to fetch"), most likely because of
   // the page's content security policy. GM_xmlhttpRequest (Tampermonkey) and PDA_httpPost
   // (Torn PDA) run outside the page, so the policy doesn't apply.
+  // Torn PDA's documented route is window.flutter_inappwebview.callHandler('PDA_httpPost', url,
+  // headers, body), which returns { status, statusText, responseText, responseHeaders }.
+  // A global PDA_httpPost only exists when a GM shim script is loaded, so it's the fallback.
+  function pdaPoster() {
+    const bridge = window.flutter_inappwebview;
+    if (bridge && typeof bridge.callHandler === 'function') {
+      return { fn: (u, h, b) => bridge.callHandler('PDA_httpPost', u, h, b), via: 'PDA bridge' };
+    }
+    if (typeof PDA_httpPost === 'function') return { fn: PDA_httpPost, via: 'PDA_httpPost' };
+    return null;
+  }
+  let lastTransport = '';
+
   function postJSON(url, headers, body) {
     const data = JSON.stringify(body);
     const parse = (status, text) => {
+      if (text && typeof text === 'object') return { status, json: text };
       let j = null;
       try { j = JSON.parse(text); } catch (e) {}
       return { status, json: j };
     };
+    const tag = (via) => (e) => {
+      throw new Error(`${(e && e.message) || 'Request failed'} [via ${via}]`);
+    };
     if (!IS_PDA && typeof GM_xmlhttpRequest === 'function') {
+      lastTransport = 'GM_xmlhttpRequest';
       return new Promise((resolve, reject) => {
         GM_xmlhttpRequest({
           method: 'POST', url, headers, data, timeout: REQ_TIMEOUT,
@@ -254,11 +272,23 @@
         });
       });
     }
-    if (typeof PDA_httpPost === 'function') {
+    const pda = IS_PDA ? pdaPoster() : null;
+    if (pda) {
+      lastTransport = pda.via;
       const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error('Request timed out')), REQ_TIMEOUT));
-      return Promise.race([Promise.resolve(PDA_httpPost(url, headers, data)), timeout]).then((r) => parse(r.status, r.responseText));
+      return Promise.race([Promise.resolve(pda.fn(url, headers, data)), timeout])
+        .then((r) => {
+          if (typeof r === 'string') {
+            try { r = JSON.parse(r); } catch (e) { return parse(200, r); }
+          }
+          return parse(Number((r && r.status) || 0), r && (r.responseText !== undefined ? r.responseText : r.data));
+        })
+        .catch(tag(pda.via));
     }
-    return timedFetch(url, { method: 'POST', headers, body: data }).then((r) => r.text().then((txt) => parse(r.status, txt)));
+    lastTransport = 'fetch';
+    return timedFetch(url, { method: 'POST', headers, body: data })
+      .then((r) => r.text().then((txt) => parse(r.status, txt)))
+      .catch(tag('fetch'));
   }
 
   // ---------- API ----------
@@ -352,6 +382,7 @@
               return j;
             })
             .catch((e) => ({ error: e && e.message ? e.message : 'unreachable' }))
+            .then((j) => (j && j.error && !/\[via /.test(j.error) ? Object.assign({}, j, { error: `${j.error} [via ${lastTransport}]` }) : j))
         : Promise.resolve(null);
 
       const [me, srv, ...lists] = await Promise.all([
