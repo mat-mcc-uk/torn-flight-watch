@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Flight Watch
 // @namespace    mcc.torn.ukwatch
-// @version      1.5.0
+// @version      1.5.1
 // @description  Watches the factions you're at war with, shows which countries are safe or risky, and alerts when enemies fly to, land in, or leave the country you're in or heading to.
 // @author       Ripcorder [4252513]
 // @match        https://www.torn.com/*
@@ -11,6 +11,8 @@
 // @grant        GM_xmlhttpRequest
 // @connect      discord.com
 // @connect      discordapp.com
+// @connect      supabase.co
+// @connect      lwqcyivwyebhnqwubhuy.supabase.co
 // @run-at       document-idle
 // @homepageURL  https://github.com/mat-mcc-uk/torn-flight-watch
 // @updateURL    https://raw.githubusercontent.com/mat-mcc-uk/torn-flight-watch/main/torn-flight-watch.user.js
@@ -231,6 +233,33 @@
     return false;
   }
 
+  // ---------- Cross-site POST ----------
+  // A plain fetch() to Supabase from torn.com fails ("Failed to fetch"), most likely because of
+  // the page's content security policy. GM_xmlhttpRequest (Tampermonkey) and PDA_httpPost
+  // (Torn PDA) run outside the page, so the policy doesn't apply.
+  function postJSON(url, headers, body) {
+    const data = JSON.stringify(body);
+    const parse = (status, text) => {
+      let j = null;
+      try { j = JSON.parse(text); } catch (e) {}
+      return { status, json: j };
+    };
+    if (!IS_PDA && typeof GM_xmlhttpRequest === 'function') {
+      return new Promise((resolve, reject) => {
+        GM_xmlhttpRequest({
+          method: 'POST', url, headers, data, timeout: 15000,
+          onload: (r) => resolve(parse(r.status, r.responseText)),
+          onerror: () => reject(new Error('GM request failed')),
+          ontimeout: () => reject(new Error('GM request timed out')),
+        });
+      });
+    }
+    if (typeof PDA_httpPost === 'function') {
+      return Promise.resolve(PDA_httpPost(url, headers, data)).then((r) => parse(r.status, r.responseText));
+    }
+    return fetch(url, { method: 'POST', headers, body: data }).then((r) => r.text().then((txt) => parse(r.status, txt)));
+  }
+
   // ---------- API ----------
   const api = (path, key) =>
     fetch(`https://api.torn.com/v2/${path}${path.includes('?') ? '&' : '?'}key=${encodeURIComponent(key)}`)
@@ -300,12 +329,8 @@
 
       const token = cfg.serverToken || SERVER_TOKEN;
       const serverReq = token
-        ? fetch(SERVER_URL, {
-            method: 'POST',
-            headers: { apikey: SERVER_KEY, 'Content-Type': 'application/json' },
-            body: JSON.stringify({ p_token: token }),
-          })
-            .then((r) => r.json().then((j) => (r.ok ? j : { error: (j && (j.message || j.error)) || `HTTP ${r.status}` })))
+        ? postJSON(SERVER_URL, { apikey: SERVER_KEY, 'Content-Type': 'application/json' }, { p_token: token })
+            .then(({ status, json: j }) => (status >= 200 && status < 300 && j ? j : { error: (j && (j.message || j.error)) || `HTTP ${status}` }))
             .then((j) => {
               // Throttled (another device on the same connection read it a moment ago): reuse the last good copy.
               if (j && j.throttled) return store.get('fw_srv', null) || j;
