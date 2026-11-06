@@ -70,7 +70,7 @@ Flights the server timed show `(srv)` next to their countdown.
 
 ## API usage
 
-Everything works with a Public access key. Each poll makes one call for your own status plus one per enemy faction. The war lookup runs every 5 minutes. A single ranked war at the default 30-second poll uses about 5 calls a minute, well under Torn's 100-per-minute limit.
+Everything works with a Public access key. When the server is up and its data is less than 2 minutes old, the script reads enemy positions from the server and only uses your key to check your own status: one call per poll. If the server is down, stale, or you're in fixed-faction mode, the script falls back to fetching the enemy factions itself (one call per faction per poll, plus the war lookup every 5 minutes).
 
 Only one Torn tab polls at a time, so several open tabs don't double up the calls or the alerts.
 

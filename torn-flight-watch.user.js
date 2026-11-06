@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Flight Watch
 // @namespace    mcc.torn.ukwatch
-// @version      1.5.3
+// @version      1.6.0
 // @description  Watches the factions you're at war with, shows which countries are safe or risky, and alerts when enemies fly to, land in, or leave the country you're in or heading to.
 // @author       Ripcorder [4252513]
 // @match        https://www.torn.com/*
@@ -179,7 +179,7 @@
     const board = {};
     for (const c of COUNTRIES) board[c] = { there: [], hosp: [], inbound: [] };
     for (const [id, r] of Object.entries(state)) {
-      if (id === '_init' || !r.country || !board[r.country]) continue;
+      if (id.startsWith('_') || !r || !r.country || !board[r.country]) continue;
       if (r.kind === 'there') board[r.country][r.hosp ? 'hosp' : 'there'].push([id, r]);
       if (r.kind === 'out') board[r.country].inbound.push([id, r]);
     }
@@ -302,8 +302,13 @@
       })
       .finally(() => timer && clearTimeout(timer));
   };
+  // Cache-busting: some webviews (Torn PDA on iOS) serve repeat GETs from their HTTP cache, which
+  // froze the member list. no-store plus the API's own timestamp parameter forces a fresh copy.
   const api = (path, key) =>
-    timedFetch(`https://api.torn.com/v2/${path}${path.includes('?') ? '&' : '?'}key=${encodeURIComponent(key)}`)
+    timedFetch(
+      `https://api.torn.com/v2/${path}${path.includes('?') ? '&' : '?'}timestamp=${Date.now()}&key=${encodeURIComponent(key)}`,
+      { cache: 'no-store' }
+    )
       .then((r) => r.json())
       .then((j) => {
         if (j && j.error) throw new Error(`API error ${j.error.code}: ${j.error.error}`);
@@ -349,6 +354,26 @@
   let forceWarCheck = true;
   let polling = false; // stops a slow poll overlapping the next one and overwriting newer data
 
+  const SERVER_FRESH = 120; // seconds; older server data counts as stale and the script polls Torn itself
+
+  function readServer(cfg) {
+    const token = cfg.serverToken || SERVER_TOKEN;
+    if (!token) return Promise.resolve(null);
+    return postJSON(SERVER_URL, { apikey: SERVER_KEY, 'Content-Type': 'application/json' }, { p_token: token })
+      .then(({ status, json: j }) => (status >= 200 && status < 300 && j ? j : { error: (j && (j.message || j.error)) || `HTTP ${status}` }))
+      .then((j) => {
+        // Throttled (another device on the same connection read it a moment ago): reuse the last good copy.
+        if (j && j.throttled) {
+          const cached = store.get('fw_srv', null);
+          return cached ? Object.assign({}, cached, { fromCache: true }) : j;
+        }
+        if (j && !j.error) store.set('fw_srv', j);
+        return j;
+      })
+      .catch((e) => ({ error: e && e.message ? e.message : 'unreachable' }))
+      .then((j) => (j && j.error && !/\[via /.test(j.error) ? Object.assign({}, j, { error: `${j.error} [via ${lastTransport}]` }) : j));
+  }
+
   async function poll() {
     if (polling) return;
     const cfg = getCfg();
@@ -360,52 +385,93 @@
     polling = true;
 
     try {
-      // Which factions to watch.
-      let enemies;
-      if (cfg.enemyMode === 'auto') {
-        await refreshWars(cfg, forceWarCheck);
-        forceWarCheck = false;
-        enemies = getMeta().enemies;
-      } else {
-        enemies = cfg.factionId.split(',').map((s) => s.trim()).filter(Boolean).map((id) => ({ id, name: `Faction ${id}`, type: 'manual' }));
-        setMeta(Object.assign(getMeta(), { enemies, warNote: '' }));
-      }
+      const [me, srv] = await Promise.all([api('user/basic?striptags=true', cfg.apiKey), readServer(cfg)]);
 
-      const token = cfg.serverToken || SERVER_TOKEN;
-      const serverReq = token
-        ? postJSON(SERVER_URL, { apikey: SERVER_KEY, 'Content-Type': 'application/json' }, { p_token: token })
-            .then(({ status, json: j }) => (status >= 200 && status < 300 && j ? j : { error: (j && (j.message || j.error)) || `HTTP ${status}` }))
-            .then((j) => {
-              // Throttled (another device on the same connection read it a moment ago): reuse the last good copy.
-              if (j && j.throttled) return store.get('fw_srv', null) || j;
-              if (j && !j.error) store.set('fw_srv', j);
-              return j;
-            })
-            .catch((e) => ({ error: e && e.message ? e.message : 'unreachable' }))
-            .then((j) => (j && j.error && !/\[via /.test(j.error) ? Object.assign({}, j, { error: `${j.error} [via ${lastTransport}]` }) : j))
-        : Promise.resolve(null);
-
-      const [me, srv, ...lists] = await Promise.all([
-        api('user/basic?striptags=true', cfg.apiKey),
-        serverReq,
-        ...enemies.map((e) => api(`faction/${encodeURIComponent(e.id)}/members?striptags=true`, cfg.apiKey)),
-      ]);
-      lastError = '';
-
-      // Server takeoff times, keyed by player.
-      const srvById = new Map();
+      // Server health.
       let server = null;
+      let serverUsable = false;
       if (srv) {
         if (srv.error) {
           server = { ok: false, error: srv.error };
         } else if (srv.throttled) {
           server = { ok: true, error: '', lastPoll: 0, at: t, note: 'throttled, no cached copy yet' };
         } else {
-          (srv.members || []).forEach((r) => srvById.set(String(r.player_id), r));
           const m = srv.meta || {};
-          server = { ok: !m.last_error, error: m.last_error || '', lastPoll: m.last_poll || 0, at: srv.now || t };
+          const age = t - (m.last_poll || 0);
+          server = { ok: !m.last_error, error: m.last_error || '', lastPoll: m.last_poll || 0, at: t, cached: !!srv.fromCache };
+          // The server only tracks the war opponents, so fixed-faction mode always polls Torn directly.
+          serverUsable = server.ok && age <= SERVER_FRESH && cfg.enemyMode === 'auto';
         }
       }
+
+      // Build one list of observations, from the server when it's fresh, otherwise from Torn.
+      // obs: { id, name, level, faction, loc, plane, until, rawState, rawDesc, srvDepart }
+      const obs = [];
+      const debug = { at: t, factions: [], source: serverUsable ? 'server' : 'torn' };
+      let enemies;
+
+      if (serverUsable) {
+        enemies = ((srv.meta && srv.meta.enemies) || []).filter((e) => cfg.includeMinorWars || e.type === 'ranked');
+        const watched = new Set(enemies.map((e) => String(e.id)));
+        setMeta(Object.assign(getMeta(), { enemies, warNote: enemies.length ? '' : 'Not at war right now' }));
+        // The server returns everyone who isn't sitting in Torn; anyone missing is in Torn.
+        for (const r of srv.members || []) {
+          if (!watched.has(String(r.faction_id))) continue;
+          obs.push({
+            id: String(r.player_id),
+            name: r.name,
+            level: r.level,
+            faction: r.faction_name,
+            loc: { kind: r.kind, country: r.country, hosp: !!r.hosp },
+            plane: r.plane || null,
+            until: r.hosp ? r.hosp_until : null,
+            rawState: r.kind === 'there' ? (r.hosp ? 'Hospital' : 'Abroad') : 'Traveling',
+            rawDesc: `${r.kind} ${r.country || ''} (from server)`,
+            srvDepart: r.kind === 'out' ? r.depart_at || null : null,
+          });
+        }
+        enemies.forEach((e) => debug.factions.push({ id: e.id, name: e.name, count: obs.filter((o) => o.faction === e.name).length, away: true }));
+      } else {
+        if (cfg.enemyMode === 'auto') {
+          await refreshWars(cfg, forceWarCheck);
+          forceWarCheck = false;
+          enemies = getMeta().enemies;
+        } else {
+          enemies = cfg.factionId.split(',').map((x) => x.trim()).filter(Boolean).map((id) => ({ id, name: `Faction ${id}`, type: 'manual' }));
+          setMeta(Object.assign(getMeta(), { enemies, warNote: '' }));
+        }
+        // Server takeoff times still help when its data is stale but present.
+        const srvDepart = new Map();
+        if (srv && !srv.error && !srv.throttled) {
+          (srv.members || []).forEach((r) => r.kind === 'out' && r.depart_at && srvDepart.set(String(r.player_id), r));
+        }
+        const lists = await Promise.all(enemies.map((e) => api(`faction/${encodeURIComponent(e.id)}/members?striptags=true`, cfg.apiKey)));
+        lists.forEach((data, i) => {
+          const fac = enemies[i];
+          // v2 returns an array; accept an id-keyed object too in case that ever changes.
+          const raw = (data && data.members) || [];
+          const members = Array.isArray(raw) ? raw : Object.entries(raw).map(([mid, mm]) => Object.assign({ id: Number(mid) }, mm));
+          debug.factions.push({ id: fac.id, name: fac.name, count: members.length });
+          for (const m of members) {
+            const st = m.status || {};
+            const loc = parseLoc(st);
+            const sv = srvDepart.get(String(m.id));
+            obs.push({
+              id: String(m.id),
+              name: m.name,
+              level: m.level,
+              faction: fac.name,
+              loc,
+              plane: st.plane_image_type || null,
+              until: st.until || null,
+              rawState: st.state || '',
+              rawDesc: st.description || '',
+              srvDepart: sv && sv.country === loc.country && loc.kind === 'out' ? sv.depart_at : null,
+            });
+          }
+        });
+      }
+      lastError = '';
 
       // Where am I? Alerts only fire for the country I'm in or flying to.
       const myStatus = (me && me.profile && me.profile.status) || {};
@@ -421,97 +487,96 @@
       const prevDest = meta.myDest;
       const state = getState();
       const firstRun = !state._init;
+      // Switching between server and Torn data: the server list leaves out people in Torn, so a
+      // missing record means "was in Torn", not "never seen".
+      const prevSource = state._source;
+      state._source = debug.source;
       const seen = new Set();
 
-      const debug = { at: t, factions: [] };
-      lists.forEach((data, i) => {
-        const fac = enemies[i];
-        // v2 returns an array; accept an id-keyed object too in case that ever changes.
-        const raw = (data && data.members) || [];
-        const members = Array.isArray(raw) ? raw : Object.entries(raw).map(([mid, mm]) => Object.assign({ id: Number(mid) }, mm));
-        debug.factions.push({ id: fac.id, name: fac.name, count: members.length });
-        for (const m of members) {
-          const id = String(m.id);
-          seen.add(id);
-          const s = m.status || {};
-          const loc = parseLoc(s);
-          const key = `${loc.kind}:${loc.country || ''}`;
+      for (const o of obs) {
+        const { id, loc } = o;
+        seen.add(id);
+        const key = `${loc.kind}:${loc.country || ''}`;
+        const old = state[id];
+        const prev = old
+          ? { key: old.key, kind: old.kind, country: old.country, seenAt: old.seenAt }
+          : !firstRun && prevSource === debug.source && debug.source === 'server'
+            ? { key: 'torn:', kind: 'torn', country: null, seenAt: t - cfg.pollSec }
+            : null;
+        const rec = old || { key, departAt: null, warned: false };
+        rec.name = o.name;
+        rec.level = o.level;
+        rec.faction = o.faction;
+        rec.plane = o.plane || (loc.kind === 'out' ? rec.plane : null) || null;
+        rec.kind = loc.kind;
+        rec.country = loc.country;
+        rec.hosp = !!loc.hosp;
+        rec.hospUntil = loc.hosp ? o.until || null : null;
+        rec.rawState = o.rawState;
+        rec.rawDesc = o.rawDesc;
 
-          const prev = state[id] ? { key: state[id].key, kind: state[id].kind, country: state[id].country, seenAt: state[id].seenAt } : null;
-          const rec = state[id] || { key, departAt: null, warned: false };
-          rec.name = m.name;
-          rec.level = m.level;
-          rec.faction = fac.name;
-          rec.plane = s.plane_image_type || (loc.kind === 'out' ? rec.plane : null) || null;
-          rec.kind = loc.kind;
-          rec.country = loc.country;
-          rec.hosp = !!loc.hosp;
-          rec.hospUntil = loc.hosp ? s.until || null : null;
-          rec.rawState = s.state || '';
-          rec.rawDesc = s.description || '';
+        const profile = `https://www.torn.com/profiles.php?XID=${id}`;
+        const who = `${o.name} [${id}] (${o.faction})`;
+        const mineToo = myDest && loc.country === myDest;
+        const code = loc.country && DESTS[loc.country] ? DESTS[loc.country].code : '';
 
-          const profile = `https://www.torn.com/profiles.php?XID=${id}`;
-          const who = `${m.name} [${id}] (${fac.name})`;
-          const mineToo = myDest && loc.country === myDest;
-          const code = loc.country && DESTS[loc.country] ? DESTS[loc.country].code : '';
-
-          if (prev && prev.key !== key) {
-            if (loc.kind === 'out') {
-              // Took off since the last poll. If that poll was recent, split the difference.
-              // After a long gap (tab closed, PC asleep) we can't tell when they left, so leave it
-              // unknown rather than guess "just now"; the server's time fills it in if it has one.
-              const gap = t - (prev.seenAt || 0);
-              rec.departAt = gap <= cfg.pollSec * 3 ? t - Math.round(gap / 2) : null;
-              rec.warned = false;
-              if (mineToo && cfg.alertDepart) {
-                const mins = flightMin(loc.country, rec.plane);
-                const extra = rec.plane === 'airliner' ? ` (or ~${businessMin(loc.country)}m if business class)` : '';
-                alertOut(`Enemy flying to ${code}`, `${who} lvl ${m.level} took off for ${loc.country}. ${planeLabel(rec.plane)}${mins ? `, lands in ~${fmt(mins * 60)}${extra}` : ''}`, profile);
-              }
-            } else if (loc.kind === 'there' && prev.kind === 'out' && mineToo && cfg.alertLanded) {
-              alertOut(`Enemy landed in ${code}`, `${who} lvl ${m.level} is now in ${loc.country}`, profile);
-            } else if (loc.kind === 'back' && prev.kind === 'there' && prev.country === myDest && cfg.alertLeave) {
-              alertOut(`Enemy leaving ${code}`, `${who} lvl ${m.level} is flying back to Torn from ${loc.country}`, profile);
-            }
-          }
-
+        if (prev && prev.key !== key) {
           if (loc.kind === 'out') {
-            // Prefer the server's takeoff time: it saw the flight even if no tab was open.
-            const sv = srvById.get(id);
-            if (sv && sv.kind === 'out' && sv.country === loc.country && sv.depart_at) {
-              rec.departAt = sv.depart_at;
-              rec.fromServer = true;
-              if (!rec.plane && sv.plane) rec.plane = sv.plane;
-            } else {
-              rec.fromServer = false;
-            }
-            // Exact arrival if the API ever gives one, otherwise estimate from takeoff.
-            const mins = flightMin(loc.country, rec.plane);
-            if (s.until && s.until > t) rec.eta = s.until;
-            else if (rec.departAt && mins) rec.eta = rec.departAt + mins * 60;
-            else rec.eta = null;
-            rec.bizEta = rec.plane === 'airliner' && rec.departAt ? rec.departAt + businessMin(loc.country) * 60 : null;
-
-            if (mineToo && rec.eta && !rec.warned && t >= rec.eta - cfg.warnMin * 60) {
-              rec.warned = true;
-              if (cfg.alertWarn && !firstRun) alertOut(`Enemy landing in ${code} soon`, `${who} lvl ${m.level} lands in ${loc.country} in ~${fmt(rec.eta - t)}`, profile);
-            }
-          } else {
-            rec.departAt = null;
-            rec.eta = null;
-            rec.bizEta = null;
+            // Took off since the last poll. If that poll was recent, split the difference.
+            // After a long gap (tab closed, PC asleep) we can't tell when they left, so leave it
+            // unknown rather than guess "just now"; the server's time fills it in if it has one.
+            const gap = t - (prev.seenAt || 0);
+            rec.departAt = gap <= cfg.pollSec * 3 ? t - Math.round(gap / 2) : null;
             rec.warned = false;
+            if (mineToo && cfg.alertDepart) {
+              const mins = flightMin(loc.country, rec.plane);
+              const extra = rec.plane === 'airliner' ? ` (or ~${businessMin(loc.country)}m if business class)` : '';
+              alertOut(`Enemy flying to ${code}`, `${who} lvl ${o.level} took off for ${loc.country}. ${planeLabel(rec.plane)}${mins ? `, lands in ~${fmt(mins * 60)}${extra}` : ''}`, profile);
+            }
+          } else if (loc.kind === 'there' && prev.kind === 'out' && mineToo && cfg.alertLanded) {
+            alertOut(`Enemy landed in ${code}`, `${who} lvl ${o.level} is now in ${loc.country}`, profile);
+          } else if (loc.kind === 'back' && prev.kind === 'there' && prev.country === myDest && cfg.alertLeave) {
+            alertOut(`Enemy leaving ${code}`, `${who} lvl ${o.level} is flying back to Torn from ${loc.country}`, profile);
           }
-
-          rec.key = key;
-          rec.seenAt = t;
-          state[id] = rec;
         }
-      });
 
-      // Drop anyone who left the faction, or whose faction we no longer watch.
+        if (loc.kind === 'out') {
+          // Prefer the server's takeoff time: it saw the flight even if no tab was open.
+          if (o.srvDepart) {
+            rec.departAt = o.srvDepart;
+            rec.fromServer = true;
+          } else {
+            rec.fromServer = false;
+          }
+          // Exact arrival if the API ever gives one, otherwise estimate from takeoff.
+          const mins = flightMin(loc.country, rec.plane);
+          if (!o.srvDepart && o.until && o.until > t) rec.eta = o.until;
+          else if (rec.departAt && mins) rec.eta = rec.departAt + mins * 60;
+          else rec.eta = null;
+          rec.bizEta = rec.plane === 'airliner' && rec.departAt ? rec.departAt + businessMin(loc.country) * 60 : null;
+
+          if (mineToo && rec.eta && !rec.warned && t >= rec.eta - cfg.warnMin * 60) {
+            rec.warned = true;
+            if (cfg.alertWarn && !firstRun) alertOut(`Enemy landing in ${code} soon`, `${who} lvl ${o.level} lands in ${loc.country} in ~${fmt(rec.eta - t)}`, profile);
+          }
+        } else {
+          rec.departAt = null;
+          rec.eta = null;
+          rec.bizEta = null;
+          rec.warned = false;
+        }
+
+        rec.key = key;
+        rec.seenAt = t;
+        state[id] = rec;
+      }
+
+      // Drop anyone not reported this time: left the faction, faction no longer watched, or (server
+      // mode) back in Torn. A record that drops out while flying home just ends; alerts only care
+      // about flights towards you.
       for (const id of Object.keys(state)) {
-        if (id !== '_init' && !seen.has(id)) delete state[id];
+        if (id.startsWith('_')) continue;
+        if (!seen.has(id)) delete state[id];
       }
       state._init = true;
       setState(state);
@@ -629,8 +694,9 @@
     h += `<div class="muted">You: ${esc(meta.myRaw || 'unknown')}</div>`;
     const sv = meta.server;
     h += `<div class="muted">Server: ${!sv ? 'no reply yet' : !sv.ok ? `<span class="err">${esc(sv.error)}</span>` : sv.note ? esc(sv.note) : `OK, last enemy poll ${Math.max(0, sv.at - sv.lastPoll)}s before your last check`}</div>`;
-    (d.factions || []).forEach((f) => (h += `<div class="muted">${esc(f.name)} [${esc(f.id)}]: ${f.count} members fetched</div>`));
-    const rows = Object.entries(state).filter(([id, r]) => id !== '_init' && String(r.rawState).toLowerCase() !== 'okay');
+    h += `<div class="muted">Enemy data from: ${d.source === 'server' ? 'server (your key only checks your own status)' : 'Torn API directly'}</div>`;
+    (d.factions || []).forEach((f) => (h += `<div class="muted">${esc(f.name)} [${esc(f.id)}]: ${f.count} ${f.away ? 'away from Torn' : 'members fetched'}</div>`));
+    const rows = Object.entries(state).filter(([id, r]) => !id.startsWith('_') && String(r.rawState).toLowerCase() !== 'okay');
     h += `<table>`;
     h += rows.length
       ? rows.map(([id, r]) => `<tr><td><a href="https://www.torn.com/profiles.php?XID=${id}" target="_blank">${esc(r.name)}</a><br><span class="muted">${esc(r.rawState)}: ${esc(r.rawDesc)}</span></td><td style="text-align:right">${esc(r.kind)}${r.country ? `<br>${esc(r.country)}` : ''}</td></tr>`).join('')
