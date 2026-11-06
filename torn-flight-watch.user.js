@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Flight Watch
 // @namespace    mcc.torn.ukwatch
-// @version      1.6.5
+// @version      1.7.0
 // @description  Watches the factions you're at war with, shows which countries are safe or risky, and alerts when enemies fly to, land in, or leave the country you're in or heading to.
 // @author       Ripcorder [4252513]
 // @match        https://www.torn.com/*
@@ -68,7 +68,7 @@
   const SERVER_KEY = 'sb_publishable_TZNmF4f4b2bWSC5zuUCqLQ_f5c3EYQf'; // publishable, safe to ship
   const SERVER_TOKEN = '6d975e385dde1a96370823b2';
 
-  const VERSION = '1.6.5'; // keep in step with @version so the panel shows what's actually running
+  const VERSION = '1.7.0'; // keep in step with @version so the panel shows what's actually running
   const TAB_ID = Math.random().toString(36).slice(2);
   const LEADER_TTL = 20;   // seconds before another tab takes over polling
   const WAR_CHECK = 300;   // seconds between war lookups in auto enemy mode
@@ -91,8 +91,32 @@
   // Before this, a failed save was silent and the board kept showing the last copy that fit.
   const mem = {};
   let storeError = '';
+
+  // Torn PDA 3.15+ gives each script its own on-disk store (PDA_storage, 10 MB by default) that
+  // doesn't share the ~5 MB browser space and survives clearing the browser cache. It's async, so
+  // the script loads it once at start (see boot below), works from this in-memory copy, and writes
+  // changes back in small batches. The leader key stays in localStorage: it's tiny, and it has to
+  // be readable at once by every tab.
+  let native = null;
+  const LOCAL_ONLY = new Set(['ukw_leader']);
+  let nativePending = {};
+  let nativeTimer = null;
+  const flushNative = () => {
+    nativeTimer = null;
+    const batch = nativePending;
+    nativePending = {};
+    Promise.resolve(PDA_storage.setMany(batch))
+      .then(() => {
+        if (storeError.startsWith('PDA storage')) storeError = '';
+      })
+      .catch((e) => {
+        storeError = `PDA storage: ${(e && (e.code || e.message)) || 'save failed'}`;
+      });
+  };
+
   const store = {
     get(k, d) {
+      if (native && !LOCAL_ONLY.has(k)) return k in native ? native[k] : d;
       if (k in mem) return mem[k];
       if (useGM) return GM_getValue(k, d);
       try {
@@ -103,6 +127,12 @@
       }
     },
     set(k, v) {
+      if (native && !LOCAL_ONLY.has(k)) {
+        native[k] = v;
+        nativePending[k] = v;
+        if (!nativeTimer) nativeTimer = setTimeout(flushNative, 500);
+        return;
+      }
       const ok = () => {
         delete mem[k];
         if (storeError.startsWith(`${k}:`)) storeError = '';
@@ -754,7 +784,7 @@
   function renderDebug(state, meta, t) {
     const d = meta.debug || {};
     let h = `<h4>Raw statuses</h4>`;
-    h += `<div class="muted">Storage: ${useGM ? 'Tampermonkey' : 'localStorage'}${IS_PDA ? ' (PDA)' : ''}. Last poll: ${d.at ? `${t - d.at}s ago` : 'never'}</div>`;
+    h += `<div class="muted">Storage: ${native ? 'PDA native storage' : useGM ? 'Tampermonkey' : 'localStorage'}${IS_PDA && !native ? ' (PDA)' : ''}. Last poll: ${d.at ? `${t - d.at}s ago` : 'never'}</div>`;
     if (storeError) h += `<div class="err">Saving failed (${esc(storeError)}). Working from memory in this tab.</div>`;
     h += `<div class="muted">You: ${esc(meta.myRaw || 'unknown')}</div>`;
     const sv = meta.server;
@@ -877,15 +907,42 @@
     }
   }
 
-  // ---------- Main loop ----------
-  setInterval(() => {
-    if (amLeader()) poll();
+  // ---------- Start ----------
+  // In Torn PDA with native storage: load it once, carry over settings from the old localStorage
+  // copy on the first run, then delete our old localStorage keys to give that space back.
+  const OLD_KEYS = ['ukw_cfg', 'fw_state', 'fw_meta', 'fw_srv'];
+  async function boot() {
+    if (!IS_PDA || typeof PDA_storage === 'undefined' || !PDA_storage || typeof PDA_storage.loadAll !== 'function') return;
+    try {
+      const all = (await PDA_storage.loadAll()) || {};
+      if (!('ukw_cfg' in all)) {
+        try {
+          const old = localStorage.getItem('fw:ukw_cfg');
+          if (old) {
+            all.ukw_cfg = JSON.parse(old);
+            await PDA_storage.set('ukw_cfg', all.ukw_cfg);
+          }
+        } catch (e) {}
+      }
+      native = all;
+      for (const k of OLD_KEYS) {
+        try { localStorage.removeItem(`fw:${k}`); } catch (e) {}
+      }
+    } catch (e) {
+      storeError = `PDA storage: ${(e && (e.code || e.message)) || 'load failed'}, using localStorage`;
+    }
+  }
+
+  boot().then(() => {
+    setInterval(() => {
+      if (amLeader()) poll();
+      updateBadge();
+      if (!showSettings) render();
+    }, 1000);
     updateBadge();
-    if (!showSettings) render();
-  }, 1000);
+  });
 
   if (window.Notification && Notification.permission === 'default') {
     try { Notification.requestPermission(); } catch (e) {}
   }
-  updateBadge();
 })();

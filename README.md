@@ -10,7 +10,7 @@ A Tampermonkey userscript for Torn City. It tracks the members of the factions y
 
 Tampermonkey checks this repo for updates on its own schedule.
 
-**Torn PDA:** add the script under Settings > Userscripts using the raw link. PDA fills in your API key automatically. PDA keeps its own settings, separate from your browser.
+**Torn PDA:** add the script under Settings > Userscripts using the raw link. PDA fills in your API key automatically. On PDA 3.15 or later the script saves its data in PDA's native storage (the storage badge on the Userscripts page), so it doesn't compete with Torn and other scripts for the browser's small shared space and survives clearing the browser cache. PDA keeps its own settings, separate from your browser.
 
 ## What it does
 
