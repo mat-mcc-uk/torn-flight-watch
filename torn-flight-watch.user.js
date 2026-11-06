@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Flight Watch
 // @namespace    mcc.torn.ukwatch
-// @version      1.5.1
+// @version      1.5.2
 // @description  Watches the factions you're at war with, shows which countries are safe or risky, and alerts when enemies fly to, land in, or leave the country you're in or heading to.
 // @author       Ripcorder [4252513]
 // @match        https://www.torn.com/*
@@ -247,7 +247,7 @@
     if (!IS_PDA && typeof GM_xmlhttpRequest === 'function') {
       return new Promise((resolve, reject) => {
         GM_xmlhttpRequest({
-          method: 'POST', url, headers, data, timeout: 15000,
+          method: 'POST', url, headers, data, timeout: REQ_TIMEOUT,
           onload: (r) => resolve(parse(r.status, r.responseText)),
           onerror: () => reject(new Error('GM request failed')),
           ontimeout: () => reject(new Error('GM request timed out')),
@@ -255,14 +255,25 @@
       });
     }
     if (typeof PDA_httpPost === 'function') {
-      return Promise.resolve(PDA_httpPost(url, headers, data)).then((r) => parse(r.status, r.responseText));
+      const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error('Request timed out')), REQ_TIMEOUT));
+      return Promise.race([Promise.resolve(PDA_httpPost(url, headers, data)), timeout]).then((r) => parse(r.status, r.responseText));
     }
-    return fetch(url, { method: 'POST', headers, body: data }).then((r) => r.text().then((txt) => parse(r.status, txt)));
+    return timedFetch(url, { method: 'POST', headers, body: data }).then((r) => r.text().then((txt) => parse(r.status, txt)));
   }
 
   // ---------- API ----------
+  const REQ_TIMEOUT = 10000; // ms before a request counts as failed
+  const timedFetch = (url, opts = {}) => {
+    const ctl = typeof AbortController === 'function' ? new AbortController() : null;
+    const timer = ctl ? setTimeout(() => ctl.abort(), REQ_TIMEOUT) : null;
+    return fetch(url, Object.assign({}, opts, ctl ? { signal: ctl.signal } : {}))
+      .catch((e) => {
+        throw new Error(e && e.name === 'AbortError' ? 'Request timed out' : (e && e.message) || 'Network error');
+      })
+      .finally(() => timer && clearTimeout(timer));
+  };
   const api = (path, key) =>
-    fetch(`https://api.torn.com/v2/${path}${path.includes('?') ? '&' : '?'}key=${encodeURIComponent(key)}`)
+    timedFetch(`https://api.torn.com/v2/${path}${path.includes('?') ? '&' : '?'}key=${encodeURIComponent(key)}`)
       .then((r) => r.json())
       .then((j) => {
         if (j && j.error) throw new Error(`API error ${j.error.code}: ${j.error.error}`);
@@ -306,14 +317,17 @@
   let lastPoll = 0;
   let lastError = '';
   let forceWarCheck = true;
+  let polling = false; // stops a slow poll overlapping the next one and overwriting newer data
 
   async function poll() {
+    if (polling) return;
     const cfg = getCfg();
     if (!cfg.apiKey) return;
     if (cfg.enemyMode === 'manual' && !cfg.factionId) return;
     const t = now();
     if (t - lastPoll < cfg.pollSec) return;
     lastPoll = t;
+    polling = true;
 
     try {
       // Which factions to watch.
@@ -412,8 +426,11 @@
 
           if (prev && prev.key !== key) {
             if (loc.kind === 'out') {
-              // Took off since the last poll. Split the difference between polls.
-              rec.departAt = t - Math.round(Math.min(t - (prev.seenAt || t), cfg.pollSec * 2) / 2);
+              // Took off since the last poll. If that poll was recent, split the difference.
+              // After a long gap (tab closed, PC asleep) we can't tell when they left, so leave it
+              // unknown rather than guess "just now"; the server's time fills it in if it has one.
+              const gap = t - (prev.seenAt || 0);
+              rec.departAt = gap <= cfg.pollSec * 3 ? t - Math.round(gap / 2) : null;
               rec.warned = false;
               if (mineToo && cfg.alertDepart) {
                 const mins = flightMin(loc.country, rec.plane);
@@ -476,6 +493,8 @@
       setMeta(Object.assign(getMeta(), { myDest, myLoc, myRaw: `${myStatus.state || ''}: ${myStatus.description || ''}`, debug, server }));
     } catch (e) {
       lastError = e && e.message ? e.message : 'Network error';
+    } finally {
+      polling = false;
     }
   }
 

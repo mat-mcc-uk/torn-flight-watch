@@ -24,6 +24,7 @@ const NAMES: Record<string, string[]> = {
 };
 const PLANE_INDEX: Record<string, number> = { airliner: 0, light_aircraft: 1, private_jet: 2 };
 const WAR_CHECK = 300;
+const MAX_GAP = 90; // seconds, three 30-second runs
 
 const namesFor = (c: string) => NAMES[c] ?? [c.toLowerCase()];
 const findCountry = (s: string) => COUNTRIES.find((c) => namesFor(c).some((n) => s.includes(n))) ?? null;
@@ -61,7 +62,9 @@ function parseLoc(s: any): Loc {
 }
 
 async function torn(path: string, key: string) {
-  const r = await fetch(`https://api.torn.com/v2/${path}${path.includes("?") ? "&" : "?"}key=${encodeURIComponent(key)}`);
+  const r = await fetch(`https://api.torn.com/v2/${path}${path.includes("?") ? "&" : "?"}key=${encodeURIComponent(key)}`, {
+    signal: AbortSignal.timeout(10000),
+  });
   const j = await r.json();
   if (j?.error) throw new Error(`Torn API ${j.error.code}: ${j.error.error}`);
   return j;
@@ -126,8 +129,10 @@ Deno.serve(async (req) => {
         let depart_at: number | null = null;
         if (loc.kind === "out") {
           if (prev && moved) {
-            // Took off since the last poll: split the difference, capped so a long gap doesn't skew it.
-            depart_at = t - Math.round(Math.min(t - Number(prev.seen_at), 120) / 2);
+            // Took off since the last poll. If that poll was recent, split the difference.
+            // After a long gap (missed runs) the takeoff time is unknown, so don't guess.
+            const gap = t - Number(prev.seen_at);
+            depart_at = gap <= MAX_GAP ? t - Math.round(gap / 2) : null;
           } else if (prev && !moved) {
             depart_at = prev.depart_at;
           }
