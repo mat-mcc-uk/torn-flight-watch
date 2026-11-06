@@ -33,7 +33,7 @@ Tampermonkey checks this repo for updates on its own schedule.
 
 **Faction mates at risk**
 - Lists faction mates who are in, or flying to, a country with enemies in it or on the way. This needs the server, which tracks your own faction's travel as well as the enemy's.
-- **Warn** copies a ready-made warning and opens a Torn message to that player. You paste it and press send. Torn's rules don't allow scripts to send messages on their own.
+- **Warn** opens a Torn message to that player with the subject and warning already written in. You check it and press Send yourself, because Torn's rules don't allow scripts to send messages. The warning is also copied, so you can paste it if Torn changes its message page and the fill-in can't find the boxes.
 - The button shows an orange count when any mates are at risk.
 
 **Alerts** (only for the country you're in or flying to)

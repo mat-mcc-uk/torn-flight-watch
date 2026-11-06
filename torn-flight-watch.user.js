@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Flight Watch
 // @namespace    mcc.torn.ukwatch
-// @version      1.8.0
+// @version      1.9.0
 // @description  Watches the factions you're at war with, shows which countries are safe or risky, and alerts when enemies fly to, land in, or leave the country you're in or heading to.
 // @author       Ripcorder [4252513]
 // @match        https://www.torn.com/*
@@ -69,7 +69,7 @@
   const SERVER_KEY = 'sb_publishable_TZNmF4f4b2bWSC5zuUCqLQ_f5c3EYQf'; // publishable, safe to ship
   const SERVER_TOKEN = '6d975e385dde1a96370823b2';
 
-  const VERSION = '1.8.0'; // keep in step with @version so the panel shows what's actually running
+  const VERSION = '1.9.0'; // keep in step with @version so the panel shows what's actually running
   const TAB_ID = Math.random().toString(36).slice(2);
   const LEADER_TTL = 20;   // seconds before another tab takes over polling
   const WAR_CHECK = 300;   // seconds between war lookups in auto enemy mode
@@ -113,6 +113,11 @@
       .catch((e) => {
         storeError = `PDA storage: ${(e && (e.code || e.message)) || 'save failed'}`;
       });
+  };
+
+  const flushNow = () => {
+    if (nativeTimer) clearTimeout(nativeTimer);
+    if (Object.keys(nativePending).length) flushNative();
   };
 
   const store = {
@@ -1012,11 +1017,16 @@
           const m = mates[Number(b.dataset.warn)];
           if (!m) return;
           const text = warningText(m.f, m.b, now());
-          const go = () => window.open(`https://www.torn.com/messages.php#/p=compose&XID=${encodeURIComponent(m.f.player_id)}`, '_blank');
-          copyText(text)
-            .then(() => toast(`Warning copied. Paste it into the message to ${m.f.name} and send.`))
-            .catch(() => toast(`Couldn't copy. The message: ${text}`))
-            .finally(go);
+          const subject = `Flight Watch: ${m.f.country} is risky`;
+          // Hand the message to the compose page, which fills it in (see prefillCompose). Saved to
+          // storage for the new tab, and in the link as a fallback in case storage isn't shared.
+          const pending = { xid: String(m.f.player_id), subject, body: text, ts: now() };
+          store.set('fw_pending', pending);
+          if (native) flushNow();
+          const hash = `#/p=compose&XID=${encodeURIComponent(m.f.player_id)}&fwmsg=${encodeURIComponent(JSON.stringify({ s: subject, b: text, ts: pending.ts }))}`;
+          const go = () => window.open(`https://www.torn.com/messages.php${hash}`, '_blank');
+          // Copy as well, so pasting still works if Torn's page changes and the fill-in can't find the boxes.
+          copyText(text).catch(() => {}).finally(go);
         };
       });
     }
@@ -1058,6 +1068,88 @@
     }
   }
 
+  // ---------- Compose prefill ----------
+  // On Torn's compose page, fill in a warning queued by the Warn button. The user reads it and
+  // presses Send themselves: Torn's rules don't allow scripts to send messages.
+  function readPending() {
+    let p = store.get('fw_pending', null);
+    const m = location.hash.match(/[&?]fwmsg=([^&]+)/);
+    if (m) {
+      try {
+        const h = JSON.parse(decodeURIComponent(m[1]));
+        const xid = (location.hash.match(/XID=(\d+)/) || [])[1];
+        if (!p || (h.ts || 0) >= (p.ts || 0)) p = { xid, subject: h.s, body: h.b, ts: h.ts };
+      } catch (e) {}
+    }
+    return p;
+  }
+  // React and similar frameworks ignore plain .value writes; use the native setter plus events.
+  function setFieldValue(el, value) {
+    const proto = el.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+    const setter = Object.getOwnPropertyDescriptor(proto, 'value');
+    setter && setter.set ? setter.set.call(el, value) : (el.value = value);
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+    el.dispatchEvent(new Event('change', { bubbles: true }));
+  }
+  function setEditable(el, text) {
+    const doc = el.ownerDocument;
+    el.focus();
+    try {
+      doc.execCommand('selectAll', false, null);
+      if (doc.execCommand('insertText', false, text)) return true;
+    } catch (e) {}
+    el.textContent = text;
+    el.dispatchEvent(new InputEvent('input', { bubbles: true }));
+    return true;
+  }
+  const visible = (el) => !!el && (el.offsetWidth > 0 || el.offsetHeight > 0 || el.getClientRects().length > 0);
+  function findSubject() {
+    const sel = 'input[name="subject"], input#subject, input[name*="subject" i], input[placeholder*="subject" i], input[aria-label*="subject" i]';
+    return [...document.querySelectorAll(sel)].find(visible) || null;
+  }
+  function findBody() {
+    const ta = [...document.querySelectorAll('textarea')].find((x) => visible(x) && x.id !== 'ukw-fw-ta');
+    if (ta) return { el: ta, kind: 'textarea' };
+    const ce = [...document.querySelectorAll('[contenteditable="true"], [contenteditable=""]')].find((x) => visible(x) && !x.closest('#ukw-panel'));
+    if (ce) return { el: ce, kind: 'editable' };
+    // Rich editors that live in an iframe (TinyMCE and similar).
+    for (const f of document.querySelectorAll('iframe')) {
+      try {
+        const b = f.contentDocument && f.contentDocument.body;
+        if (b && b.isContentEditable && visible(f)) return { el: b, kind: 'editable' };
+      } catch (e) {}
+    }
+    return null;
+  }
+  let prefillRunning = false;
+  function prefillCompose() {
+    if (prefillRunning || !/messages\.php/.test(location.pathname) || !/p=compose/.test(location.hash)) return;
+    const p = readPending();
+    if (!p || now() - (p.ts || 0) > 300) return; // only warnings queued in the last 5 minutes
+    const xid = (location.hash.match(/XID=(\d+)/) || [])[1];
+    if (p.xid && xid && String(p.xid) !== String(xid)) return;
+    prefillRunning = true;
+    const started = Date.now();
+    const timer = setInterval(() => {
+      const body = findBody();
+      if (body) {
+        clearInterval(timer);
+        const subj = findSubject();
+        if (subj && p.subject && !subj.value) setFieldValue(subj, p.subject);
+        if (body.kind === 'textarea') setFieldValue(body.el, p.body);
+        else setEditable(body.el, p.body);
+        store.set('fw_pending', null);
+        if (native) flushNow();
+        prefillRunning = false;
+        toast('Warning written in. Check it, then press Send.');
+      } else if (Date.now() - started > 15000) {
+        clearInterval(timer);
+        prefillRunning = false;
+        toast("Couldn't find the message box. The warning is on your clipboard: paste it in and send.");
+      }
+    }, 300);
+  }
+
   // ---------- Start ----------
   // In Torn PDA with native storage: load it once, carry over settings from the old localStorage
   // copy on the first run, then delete our old localStorage keys to give that space back.
@@ -1085,6 +1177,8 @@
   }
 
   boot().then(() => {
+    prefillCompose();
+    window.addEventListener('hashchange', prefillCompose);
     setInterval(() => {
       if (amLeader()) poll();
       updateBadge();
