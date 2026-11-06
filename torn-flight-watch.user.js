@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Flight Watch
 // @namespace    mcc.torn.ukwatch
-// @version      1.6.2
+// @version      1.6.3
 // @description  Watches the factions you're at war with, shows which countries are safe or risky, and alerts when enemies fly to, land in, or leave the country you're in or heading to.
 // @author       Ripcorder [4252513]
 // @match        https://www.torn.com/*
@@ -68,7 +68,7 @@
   const SERVER_KEY = 'sb_publishable_TZNmF4f4b2bWSC5zuUCqLQ_f5c3EYQf'; // publishable, safe to ship
   const SERVER_TOKEN = '6d975e385dde1a96370823b2';
 
-  const VERSION = '1.6.2'; // keep in step with @version so the panel shows what's actually running
+  const VERSION = '1.6.3'; // keep in step with @version so the panel shows what's actually running
   const TAB_ID = Math.random().toString(36).slice(2);
   const LEADER_TTL = 20;   // seconds before another tab takes over polling
   const WAR_CHECK = 300;   // seconds between war lookups in auto enemy mode
@@ -224,11 +224,20 @@
   }
 
   // ---------- Leader election so only one tab polls ----------
+  // Compare "1.6.3" style versions; older copies wrote no version at all.
+  const newer = (a, b) => {
+    const pa = String(a || '0').split('.').map(Number);
+    const pb = String(b || '0').split('.').map(Number);
+    for (let i = 0; i < 3; i++) if ((pa[i] || 0) !== (pb[i] || 0)) return (pa[i] || 0) > (pb[i] || 0);
+    return false;
+  };
   function amLeader() {
     const l = store.get('ukw_leader', null);
     const t = now();
-    if (!l || l.tab === TAB_ID || t - l.ts > LEADER_TTL) {
-      store.set('ukw_leader', { tab: TAB_ID, ts: t });
+    // A newer copy takes over from an older one straight away, so a leftover duplicate install
+    // can't keep writing stale data over the top.
+    if (!l || l.tab === TAB_ID || t - l.ts > LEADER_TTL || newer(VERSION, l.v)) {
+      store.set('ukw_leader', { tab: TAB_ID, ts: t, v: VERSION });
       return true;
     }
     return false;
@@ -645,6 +654,9 @@
   style.textContent = css;
   (document.head || document.documentElement).appendChild(style);
 
+  // Another copy of this script already drew its button on this page: Torn PDA can end up with
+  // the script installed more than once, and the copies overwrite each other's data.
+  const dupeOnPage = !!document.getElementById('ukw-btn');
   const btn = document.createElement('div');
   btn.id = 'ukw-btn';
   const panel = document.createElement('div');
@@ -749,6 +761,9 @@
       html += `<div class="muted">${esc(meta.warNote)}</div>`;
     }
     if (meta.myLoc) html += `<div class="muted">${esc(meta.myLoc)}</div>`;
+    if (dupeOnPage) {
+      html += `<p class="err">Flight Watch is installed more than once. Remove the extra copies (in PDA: Settings > Userscripts) and keep only the one from GitHub.</p>`;
+    }
     if (!cfg.apiKey) html += `<p class="err">Add an API key in Settings.</p>`;
     else if (cfg.enemyMode === 'manual' && !cfg.factionId) html += `<p class="err">Add a faction ID in Settings, or switch Enemy to auto.</p>`;
     if (lastError) html += `<p class="err">${esc(lastError)}</p>`;
