@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Flight Watch
 // @namespace    mcc.torn.ukwatch
-// @version      1.6.0
+// @version      1.6.1
 // @description  Watches the factions you're at war with, shows which countries are safe or risky, and alerts when enemies fly to, land in, or leave the country you're in or heading to.
 // @author       Ripcorder [4252513]
 // @match        https://www.torn.com/*
@@ -304,16 +304,34 @@
   };
   // Cache-busting: some webviews (Torn PDA on iOS) serve repeat GETs from their HTTP cache, which
   // froze the member list. no-store plus the API's own timestamp parameter forces a fresh copy.
-  const api = (path, key) =>
-    timedFetch(
-      `https://api.torn.com/v2/${path}${path.includes('?') ? '&' : '?'}timestamp=${Date.now()}&key=${encodeURIComponent(key)}`,
-      { cache: 'no-store' }
-    )
-      .then((r) => r.json())
-      .then((j) => {
-        if (j && j.error) throw new Error(`API error ${j.error.code}: ${j.error.error}`);
-        return j;
-      });
+  // In Torn PDA the web view's own fetch returned every enemy as "Okay" even with cache-busting,
+  // so PDA sends Torn calls through its native PDA_httpGet handler instead.
+  function pdaGetter() {
+    const bridge = window.flutter_inappwebview;
+    if (bridge && typeof bridge.callHandler === 'function') return (u, h) => bridge.callHandler('PDA_httpGet', u, h);
+    if (typeof PDA_httpGet === 'function') return PDA_httpGet;
+    return null;
+  }
+  const api = (path, key) => {
+    const url = `https://api.torn.com/v2/${path}${path.includes('?') ? '&' : '?'}timestamp=${Date.now()}&key=${encodeURIComponent(key)}`;
+    const get = IS_PDA ? pdaGetter() : null;
+    const req = get
+      ? Promise.race([
+          Promise.resolve(get(url, {})),
+          new Promise((_, reject) => setTimeout(() => reject(new Error('Request timed out')), REQ_TIMEOUT)),
+        ]).then((r) => {
+          if (typeof r === 'string') {
+            try { r = JSON.parse(r); } catch (e) {}
+          }
+          const body = r && r.responseText !== undefined ? r.responseText : r;
+          return typeof body === 'string' ? JSON.parse(body) : body;
+        })
+      : timedFetch(url, { cache: 'no-store' }).then((r) => r.json());
+    return req.then((j) => {
+      if (j && j.error) throw new Error(`API error ${j.error.code}: ${j.error.error}`);
+      return j;
+    });
+  };
 
   // Find the factions your faction is at war with. Stores [{ id, name, type, start }] in meta.
   let lastWarCheck = 0;

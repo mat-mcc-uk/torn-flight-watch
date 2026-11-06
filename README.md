@@ -58,7 +58,7 @@ Flight times live in the `DESTS` table at the top of the script.
 Without the server, a flight only gets an ETA if someone's script saw it take off. The server closes that gap. It runs on Supabase and polls the enemy factions every 30 seconds around the clock, recording takeoff times.
 
 - `supabase/functions/flight-watch-poll`: called by `pg_cron` every 30 seconds. It works out who the faction is at war with, fetches their members and stores each player's location and estimated takeoff time.
-- `flight_watch_read` (database function, in `supabase/migrations`): returns that data to the userscript through Supabase's REST API. It checks the faction read token and allows one fresh read per IP every 10 seconds. Reads this way don't count against the edge function quota.
+- `flight_watch_read` (database function, in `supabase/migrations`): returns that data to the userscript through Supabase's REST API. It checks the faction read token and allows up to 4 fresh reads per IP every 10 seconds, so a household's PC and phone don't throttle each other. Reads this way don't count against the edge function quota.
 - `supabase/functions/flight-watch-read`: retired, kept only to tell old script versions to update.
 - `supabase/migrations`: the tables, the read function and the cron job.
 
