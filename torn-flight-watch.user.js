@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Flight Watch
 // @namespace    mcc.torn.ukwatch
-// @version      1.3.1
+// @version      1.3.2
 // @description  Watches the factions you're at war with, shows which countries are safe or risky, and alerts when enemies fly to, land in, or leave the country you're in or heading to.
 // @author       Ripcorder [4252513]
 // @match        https://www.torn.com/*
@@ -129,17 +129,33 @@
     'South Africa': ['south africa', 'johannesburg'],
   };
   const namesFor = (c) => NAMES[c] || [c.toLowerCase()];
+  const findCountry = (str) => COUNTRIES.find((c) => namesFor(c).some((n) => str.includes(n))) || null;
   function parseLoc(s) {
     const state = String((s && s.state) || '').toLowerCase();
     const desc = String((s && s.description) || '').toLowerCase();
     const details = String((s && s.details) || '').toLowerCase();
     const text = `${desc} ${details}`;
+
+    if (state === 'traveling' || state === 'travelling') {
+      // Current format: "Traveling from Torn to China" / "Traveling from Switzerland to Torn".
+      const ft = desc.match(/from\s+(.+?)\s+to\s+(.+?)\s*$/);
+      if (ft) {
+        const [, from, to] = ft;
+        if (/\btorn\b/.test(to)) {
+          const c = findCountry(from);
+          return c ? { kind: 'back', country: c } : { kind: 'torn', country: null };
+        }
+        const c = findCountry(to);
+        return c ? { kind: 'out', country: c } : { kind: 'torn', country: null };
+      }
+      // Older formats: "Traveling to China" / "Returning to Torn from China".
+      const c = findCountry(text);
+      if (!c) return { kind: 'torn', country: null };
+      return /return/.test(desc) ? { kind: 'back', country: c } : { kind: 'out', country: c };
+    }
+
     for (const c of COUNTRIES) {
       const hit = namesFor(c).some((n) => text.includes(n));
-      if (state === 'traveling' || state === 'travelling') {
-        if (!hit) continue;
-        return /from|return/.test(desc) ? { kind: 'back', country: c } : { kind: 'out', country: c };
-      }
       if (state === 'abroad' && hit) return { kind: 'there', country: c };
       if (state === 'hospital' && DESTS[c].adj.some((a) => text.includes(`${a.toLowerCase()} hospital`))) {
         return { kind: 'there', country: c, hosp: true };
