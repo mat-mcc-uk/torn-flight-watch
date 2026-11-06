@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Flight Watch
 // @namespace    mcc.torn.ukwatch
-// @version      1.7.0
+// @version      1.8.0
 // @description  Watches the factions you're at war with, shows which countries are safe or risky, and alerts when enemies fly to, land in, or leave the country you're in or heading to.
 // @author       Ripcorder [4252513]
 // @match        https://www.torn.com/*
@@ -58,6 +58,7 @@
     alertLanded: true,
     alertLeave: false,
     alertArrive: true,         // summary of a country's risk when you start heading there
+    showMates: true,           // list faction mates flying into danger, with a Warn button
     serverToken: '',           // leave blank to use the built-in token; paste a new one here after a rotation
   };
 
@@ -68,7 +69,7 @@
   const SERVER_KEY = 'sb_publishable_TZNmF4f4b2bWSC5zuUCqLQ_f5c3EYQf'; // publishable, safe to ship
   const SERVER_TOKEN = '6d975e385dde1a96370823b2';
 
-  const VERSION = '1.7.0'; // keep in step with @version so the panel shows what's actually running
+  const VERSION = '1.8.0'; // keep in step with @version so the panel shows what's actually running
   const TAB_ID = Math.random().toString(36).slice(2);
   const LEADER_TTL = 20;   // seconds before another tab takes over polling
   const WAR_CHECK = 300;   // seconds between war lookups in auto enemy mode
@@ -677,7 +678,9 @@
         const b = countryBoard(state, t)[myDest];
         alertOut(`${myDest}: ${b.risky ? 'RISKY' : 'safe'}`, boardLine(b));
       }
-      setMeta(Object.assign(getMeta(), { myDest, myLoc, myRaw: `${myStatus.state || ''}: ${myStatus.description || ''}`, debug, server }));
+      const friends = srv && !srv.error && !srv.throttled && Array.isArray(srv.friends) ? srv.friends : null;
+      const myId = me && me.profile ? me.profile.id : null;
+      setMeta(Object.assign(getMeta(), { myDest, myLoc, myRaw: `${myStatus.state || ''}: ${myStatus.description || ''}`, debug, server, friends, myId }));
     } catch (e) {
       lastError = e && e.message ? e.message : 'Network error';
     } finally {
@@ -685,29 +688,86 @@
     }
   }
 
+  // ---------- Flags ----------
+  // Small inline SVG flags (simplified). Emoji flags don't render on Windows, and Torn's page
+  // policy can block images from other sites, so these are drawn here.
+  const ujack = (x, y, w, h) =>
+    `<svg x="${x}" y="${y}" width="${w}" height="${h}" viewBox="0 0 60 30" preserveAspectRatio="none">` +
+    '<rect width="60" height="30" fill="#012169"/>' +
+    '<path d="M0,0 L60,30 M60,0 L0,30" stroke="#fff" stroke-width="6"/>' +
+    '<path d="M0,0 L60,30 M60,0 L0,30" stroke="#C8102E" stroke-width="2.5"/>' +
+    '<path d="M30,0 v30 M0,15 h60" stroke="#fff" stroke-width="10"/>' +
+    '<path d="M30,0 v30 M0,15 h60" stroke="#C8102E" stroke-width="6"/></svg>';
+  const star = (cx, cy, r) => {
+    const pts = [];
+    for (let i = 0; i < 10; i++) {
+      const a = -Math.PI / 2 + (i * Math.PI) / 5;
+      const rr = i % 2 ? r * 0.4 : r;
+      pts.push(`${(cx + rr * Math.cos(a)).toFixed(2)},${(cy + rr * Math.sin(a)).toFixed(2)}`);
+    }
+    return `<polygon points="${pts.join(' ')}" fill="#ffde00"/>`;
+  };
+  const stripes = (cols) => cols.map((c, i) => `<rect y="${(i * 12) / cols.length}" width="18" height="${12 / cols.length + 0.05}" fill="${c}"/>`).join('');
+  const FLAG_ART = {
+    'Mexico': '<rect width="6" height="12" fill="#006847"/><rect x="6" width="6" height="12" fill="#fff"/><rect x="12" width="6" height="12" fill="#ce1126"/><circle cx="9" cy="6" r="1.6" fill="#8c5a2b"/>',
+    'Cayman Islands': `<rect width="18" height="12" fill="#012169"/>${ujack(0, 0, 9, 6)}<circle cx="13" cy="6.5" r="2.4" fill="#fff" stroke="#c8102e" stroke-width=".5"/>`,
+    'Canada': '<rect width="18" height="12" fill="#d52b1e"/><rect x="4.5" width="9" height="12" fill="#fff"/><polygon points="9,2.4 9.9,4.4 11.6,3.9 10.9,6 12.1,6.6 9.6,8.1 9.7,9.6 8.3,9.6 8.4,8.1 5.9,6.6 7.1,6 6.4,3.9 8.1,4.4" fill="#d52b1e"/>',
+    'Hawaii': `${stripes(['#fff', '#c8102e', '#012169', '#fff', '#c8102e', '#012169', '#fff', '#c8102e'])}${ujack(0, 0, 9, 6)}`,
+    'United Kingdom': ujack(0, 0, 18, 12),
+    'Argentina': `${stripes(['#74acdf', '#fff', '#74acdf'])}<circle cx="9" cy="6" r="1.4" fill="#f6b40e"/>`,
+    'Switzerland': '<rect width="18" height="12" fill="#d52b1e"/><rect x="8" y="2.6" width="2" height="6.8" fill="#fff"/><rect x="5.6" y="5" width="6.8" height="2" fill="#fff"/>',
+    'Japan': '<rect width="18" height="12" fill="#fff"/><circle cx="9" cy="6" r="3.6" fill="#bc002d"/>',
+    'China': `<rect width="18" height="12" fill="#de2910"/>${star(3.4, 3.2, 2)}${star(6.6, 1.4, 0.6)}${star(7.6, 2.9, 0.6)}${star(7.6, 4.8, 0.6)}${star(6.6, 6.2, 0.6)}`,
+    'UAE': '<rect width="18" height="4" fill="#009739"/><rect y="4" width="18" height="4" fill="#fff"/><rect y="8" width="18" height="4" fill="#000"/><rect width="4.5" height="12" fill="#ef3340"/>',
+    'South Africa': '<rect width="18" height="6" fill="#e03c31"/><rect y="6" width="18" height="6" fill="#001489"/><polygon points="0,0 3,0 9,4.4 18,4.4 18,7.6 9,7.6 3,12 0,12" fill="#fff"/><polygon points="0,1.3 1.7,0 8.5,5.1 18,5.1 18,6.9 8.5,6.9 1.7,12 0,10.7" fill="#007749"/><polygon points="0,2.4 4.9,6 0,9.6" fill="#ffb81c"/><polygon points="0,3.3 3.7,6 0,8.7" fill="#000"/>',
+  };
+  const flag = (c, size = 18) =>
+    FLAG_ART[c]
+      ? `<svg class="fw-flag" width="${size}" height="${(size * 2) / 3}" viewBox="0 0 18 12" aria-label="${esc(c)}"><title>${esc(c)}</title>${FLAG_ART[c]}<rect width="18" height="12" fill="none" stroke="rgba(255,255,255,.25)" stroke-width=".6"/></svg>`
+      : '';
+
   // ---------- UI ----------
   const css = `
-    #ukw-btn{position:fixed;left:8px;bottom:70px;z-index:99999;background:#1d3b5c;color:#fff;border:1px solid #4a7fb5;border-radius:6px;padding:6px 9px;font:bold 12px Arial;cursor:pointer}
+    #ukw-btn{position:fixed;left:8px;bottom:70px;z-index:99999;background:#1d3b5c;color:#fff;border:1px solid #4a7fb5;border-radius:6px;padding:6px 9px;font:bold 12px Arial;cursor:pointer;display:flex;align-items:center;gap:5px}
     #ukw-btn.risky{background:#7a1f1f;border-color:#c0392b}
     #ukw-btn.safe{background:#1e5a2e;border-color:#2ecc71}
-    #ukw-btn .n{background:#c0392b;border-radius:8px;padding:0 5px;margin-left:4px}
-    #ukw-panel{position:fixed;left:8px;bottom:105px;z-index:99999;width:330px;max-height:70vh;overflow:auto;background:#222;color:#ddd;border:1px solid #555;border-radius:6px;font:12px Arial;padding:8px;display:none}
-    #ukw-panel h4{margin:8px 0 4px;color:#fff;font-size:13px}
-    #ukw-panel table{width:100%;border-collapse:collapse}
-    #ukw-panel td{padding:3px 2px;border-bottom:1px solid #333;vertical-align:top}
-    #ukw-panel a{color:#6fb3ff}
+    #ukw-btn .n{background:#c0392b;border-radius:8px;padding:0 5px}
+    #ukw-btn .w{background:#e67e22;border-radius:8px;padding:0 5px}
+    #ukw-panel{position:fixed;left:8px;bottom:105px;z-index:99999;width:340px;max-width:calc(100vw - 16px);max-height:72vh;overflow:auto;background:#1b1d21;color:#d7d9dd;border:1px solid #3a3f47;border-radius:8px;font:12px/1.35 Arial,sans-serif;display:none;box-shadow:0 6px 24px rgba(0,0,0,.5)}
+    #ukw-panel .hd{display:flex;justify-content:space-between;align-items:center;padding:8px 10px;background:#23262c;border-bottom:1px solid #31353c;position:sticky;top:0;z-index:1}
+    #ukw-panel .hd b{color:#fff;font-size:13px}
+    #ukw-panel .sub{padding:6px 10px 2px;color:#9aa0a8}
+    #ukw-panel .sec{padding:6px 10px}
+    #ukw-panel h4{margin:6px 0 4px;color:#fff;font-size:12px;text-transform:uppercase;letter-spacing:.04em}
+    #ukw-panel table{width:100%;border-collapse:collapse;font:inherit;color:inherit}
+    #ukw-panel td{font:inherit;color:inherit}
+    #ukw-panel td{padding:3px 2px;border-bottom:1px solid #2c3036;vertical-align:top}
+    #ukw-panel a{color:#6fb3ff;text-decoration:none}
     #ukw-panel input[type=text],#ukw-panel input[type=number],#ukw-panel select{width:100%;box-sizing:border-box;background:#111;color:#ddd;border:1px solid #555;padding:3px;margin:2px 0 5px}
     #ukw-panel .row{display:flex;gap:6px}
     #ukw-panel .row>div{flex:1}
-    #ukw-panel button{background:#1d3b5c;color:#fff;border:1px solid #4a7fb5;border-radius:4px;padding:4px 8px;cursor:pointer;margin-top:4px}
-    #ukw-panel .err{color:#e74c3c}
-    #ukw-panel .muted{color:#888}
-    #ukw-panel .tag{display:inline-block;border-radius:4px;padding:1px 6px;font-weight:bold;font-size:11px}
-    #ukw-panel .tag.safe{background:#1e5a2e;color:#b8f5c8}
-    #ukw-panel .tag.risky{background:#7a1f1f;color:#ffc9c9}
-    #ukw-panel tr.c{cursor:pointer}
-    #ukw-panel tr.me td{background:#2b3440}
-    #ukw-panel .detail td{background:#1a1a1a;padding-left:10px}
+    #ukw-panel button{background:#1d3b5c;color:#fff;border:1px solid #4a7fb5;border-radius:4px;padding:4px 8px;cursor:pointer;margin-top:4px;font-size:11px}
+    #ukw-panel .err{color:#ff7b6b}
+    #ukw-panel .muted{color:#8a9099}
+    #ukw-panel .fw-flag{vertical-align:-1px;border-radius:2px;flex:none}
+    #ukw-panel .card{border:1px solid #3a2a2a;border-left:3px solid #c0392b;background:#241b1b;border-radius:6px;margin:0 0 6px;overflow:hidden}
+    #ukw-panel .card.me{border-color:#4a7fb5;border-left-color:#6fb3ff;background:#1c2430}
+    #ukw-panel .card .top{display:flex;align-items:center;gap:7px;padding:6px 8px;cursor:pointer}
+    #ukw-panel .card .name{font-weight:bold;color:#fff;flex:1}
+    #ukw-panel .chips{display:flex;flex-wrap:wrap;gap:4px;padding:0 8px 6px}
+    #ukw-panel .chip{border-radius:10px;padding:1px 7px;font-size:11px;background:#33373e;color:#e2e4e8;white-space:nowrap}
+    #ukw-panel .chip.there{background:#7a1f1f;color:#ffd6d0}
+    #ukw-panel .chip.in{background:#6b4a12;color:#ffe3b0}
+    #ukw-panel .chip.hosp{background:#3d3550;color:#d9ccff}
+    #ukw-panel .people{border-top:1px solid #3a2a2a;background:#1d1818;padding:2px 8px}
+    #ukw-panel .people td{border-bottom:1px solid #2a2222}
+    #ukw-panel .safe{display:flex;flex-wrap:wrap;gap:6px}
+    #ukw-panel .safe span{display:inline-flex;align-items:center;gap:4px;background:#1e2a22;border:1px solid #2c4a35;border-radius:12px;padding:2px 7px;color:#b8e6c4;font-size:11px}
+    #ukw-panel .safe span.me{border-color:#6fb3ff}
+    #ukw-panel .mate{display:flex;align-items:center;gap:7px;padding:5px 0;border-bottom:1px solid #2c3036}
+    #ukw-panel .mate .info{flex:1;min-width:0}
+    #ukw-panel .mate button{margin:0;background:#8a4b0f;border-color:#e67e22}
+    #ukw-panel .ft{display:flex;justify-content:space-between;padding:8px 10px;border-top:1px solid #31353c}
     #ukw-toast{position:fixed;left:50%;top:60px;transform:translateX(-50%);z-index:100000;background:#1d3b5c;color:#fff;padding:8px 12px;border-radius:6px;font:13px Arial;display:none;max-width:90vw}
   `;
   const style = document.createElement('style');
@@ -744,7 +804,7 @@
   function renderSettings() {
     const c = getCfg();
     const chk = (k, label) => `<label><input type="checkbox" data-k="${k}" ${c[k] ? 'checked' : ''}> ${label}</label><br>`;
-    return `
+    return `<div class="sec">
       <h4>Settings</h4>
       Public API key<input type="text" data-k="apiKey" value="${esc(c.apiKey)}">
       Enemy
@@ -766,7 +826,8 @@
       ${chk('alertWarn', 'Enemy about to land')}
       ${chk('alertLanded', 'Enemy landed')}
       ${chk('alertLeave', 'Enemy leaves your country')}
-      <button id="ukw-save">Save</button> <button id="ukw-test">Test alert</button>`;
+      ${chk('showMates', 'Show faction mates in danger')}
+      <button id="ukw-save">Save</button> <button id="ukw-test">Test alert</button></div>`;
   }
 
   function memberRow(id, r, t, multi) {
@@ -774,33 +835,75 @@
     if (r.kind === 'out') {
       const eta = r.eta ? `${fmt(r.eta - t)}${r.fromServer ? ' <span class="muted" title="Takeoff time from the server">(srv)</span>' : ''}` : '<span class="muted">ETA unknown</span>';
       const biz = r.bizEta ? `<br><span class="muted">business: ${fmt(r.bizEta - t)}</span>` : '';
-      return `<tr class="detail"><td>${link}<br><span class="muted">${planeLabel(r.plane)}</span></td><td style="text-align:right">${eta}${biz}</td></tr>`;
+      return `<tr><td>${link}<br><span class="muted">${planeLabel(r.plane)}</span></td><td style="text-align:right">${eta}${biz}</td></tr>`;
     }
     const note = r.hosp ? `in hosp${r.hospUntil && r.hospUntil > t ? ` ${fmt(r.hospUntil - t)}` : ''}` : 'landed';
-    return `<tr class="detail"><td>${link}</td><td style="text-align:right" class="muted">${note}</td></tr>`;
+    return `<tr><td>${link}</td><td style="text-align:right" class="muted">${note}</td></tr>`;
   }
 
   // Shows exactly what the API returned for each enemy and how the script read it.
   function renderDebug(state, meta, t) {
     const d = meta.debug || {};
-    let h = `<h4>Raw statuses</h4>`;
+    let h = `<div class="sec"><h4>Raw statuses</h4>`;
     h += `<div class="muted">Storage: ${native ? 'PDA native storage' : useGM ? 'Tampermonkey' : 'localStorage'}${IS_PDA && !native ? ' (PDA)' : ''}. Last poll: ${d.at ? `${t - d.at}s ago` : 'never'}</div>`;
     if (storeError) h += `<div class="err">Saving failed (${esc(storeError)}). Working from memory in this tab.</div>`;
     h += `<div class="muted">You: ${esc(meta.myRaw || 'unknown')}</div>`;
     const sv = meta.server;
     h += `<div class="muted">Server: ${!sv ? 'no reply yet' : !sv.ok ? `<span class="err">${esc(sv.error)}</span>` : sv.note ? esc(sv.note) : `OK, last enemy poll ${Math.max(0, sv.at - sv.lastPoll)}s before your last check`}</div>`;
     if (sv && sv.ok && !sv.note) {
-      h += `<div class="muted">Server data: ${sv.away || 0} enemies away, ${sv.enemies || 0} faction(s), ${Math.max(0, sv.at - sv.lastPoll)}s old${sv.cached ? ' (saved copy)' : ''}</div>`;
+      h += `<div class="muted">Server data: ${sv.away || 0} enemies away, ${sv.enemies || 0} faction(s), ${(meta.friends || []).length} faction mates away, ${Math.max(0, sv.at - sv.lastPoll)}s old${sv.cached ? ' (saved copy)' : ''}</div>`;
     }
     h += `<div class="muted">Enemy data from: ${d.source === 'server' ? 'server (your key only checks your own status)' : 'Torn API directly'}</div>`;
     (d.factions || []).forEach((f) => (h += `<div class="muted">${esc(f.name)} [${esc(f.id)}]: ${f.count} ${f.away ? 'away from Torn' : 'members fetched'}</div>`));
     const rows = Object.entries(state).filter(([id, r]) => !id.startsWith('_') && String(r.rawState).toLowerCase() !== 'okay');
     h += `<table>`;
     h += rows.length
-      ? rows.map(([id, r]) => `<tr><td><a href="https://www.torn.com/profiles.php?XID=${id}" target="_blank">${esc(r.name)}</a><br><span class="muted">${esc(r.rawState)}: ${esc(r.rawDesc)}</span></td><td style="text-align:right">${esc(r.kind)}${r.country ? `<br>${esc(r.country)}` : ''}</td></tr>`).join('')
+      ? rows.map(([id, r]) => `<tr><td>${flag(r.country, 14)} <a href="https://www.torn.com/profiles.php?XID=${id}" target="_blank">${esc(r.name)}</a><br><span class="muted">${esc(r.rawState)}: ${esc(r.rawDesc)}</span></td><td style="text-align:right">${esc(r.kind)}${r.country ? `<br>${esc(r.country)}` : ''}</td></tr>`).join('')
       : `<tr><td class="muted">Every watched enemy is Okay in Torn</td></tr>`;
-    h += `</table>`;
+    h += `</table></div>`;
     return h;
+  }
+
+  // Faction mates in, or flying to, a country with enemies in it or on the way. Needs the server.
+  function matesInDanger(meta, board, t) {
+    const out = [];
+    for (const f of meta.friends || []) {
+      if (String(f.player_id) === String(meta.myId)) continue;
+      if (f.kind !== 'out' && f.kind !== 'there') continue;
+      const b = board[f.country];
+      if (!b || !b.risky) continue;
+      out.push({ f, b });
+    }
+    // Most urgent first: already there, then by landing time.
+    out.sort((a, z) => (a.f.kind === 'there' ? 0 : a.f.eta || 9e9) - (z.f.kind === 'there' ? 0 : z.f.eta || 9e9));
+    return out;
+  }
+  function warningText(f, b, t) {
+    const when =
+      f.kind === 'there' ? `You're in ${f.country} now`
+      : f.eta ? `You land in ${f.country} in about ${fmt(f.eta - t)}`
+      : `You're flying to ${f.country}`;
+    const firstEnemy = b.inbound.find(([, r]) => r.eta);
+    const enemyEta = firstEnemy ? ` First enemy lands in about ${fmt(firstEnemy[1].eta - t)}.` : '';
+    return `Heads up from Flight Watch: ${f.country} is risky. Enemies: ${boardLine(b)}.${enemyEta} ${when}. Stay safe!`;
+  }
+  // Copy the warning, then open Torn's message composer for that player. The human presses send:
+  // Torn's rules don't allow scripts to send messages on their own.
+  function copyText(text) {
+    const bridge = window.flutter_inappwebview;
+    if (IS_PDA && bridge && typeof bridge.callHandler === 'function') return Promise.resolve(bridge.callHandler('copyToClipboard', text));
+    if (navigator.clipboard && navigator.clipboard.writeText) return navigator.clipboard.writeText(text);
+    return new Promise((resolve, reject) => {
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      ta.style.position = 'fixed';
+      ta.style.opacity = '0';
+      document.body.appendChild(ta);
+      ta.select();
+      const ok = document.execCommand && document.execCommand('copy');
+      ta.remove();
+      ok ? resolve() : reject(new Error('copy failed'));
+    });
   }
 
   function render() {
@@ -811,23 +914,23 @@
     const t = now();
     const multi = (meta.enemies || []).length > 1;
 
-    let html = `<div style="display:flex;justify-content:space-between"><b>Flight Watch <span class="muted" style="font-weight:normal">v${VERSION}</span></b><a href="#" id="ukw-gear">${showSettings ? 'Close settings' : 'Settings'}</a></div>`;
+    let html = `<div class="hd"><b>Flight Watch <span class="muted" style="font-weight:normal;font-size:11px">v${VERSION}</span></b><a href="#" id="ukw-gear">${showSettings ? 'Close' : 'Settings'}</a></div>`;
+    html += `<div class="sub">`;
     if (meta.enemies && meta.enemies.length) {
       const list = meta.enemies.map((e) => {
         const when = e.start && e.start > t ? `, starts in ${fmt(e.start - t)}` : '';
-        return `<a href="https://www.torn.com/factions.php?step=profile&ID=${esc(e.id)}" target="_blank">${esc(e.name)}</a>${e.type !== 'manual' ? ` <span class="muted">(${e.type}${when})</span>` : ''}`;
+        return `<a href="https://www.torn.com/factions.php?step=profile&ID=${esc(e.id)}" target="_blank">${esc(e.name)}</a>${e.type !== 'manual' ? ` (${e.type}${when})` : ''}`;
       }).join(', ');
-      html += `<div>Watching: ${list}</div>`;
+      html += `Watching ${list}`;
     } else if (meta.warNote && cfg.enemyMode === 'auto') {
-      html += `<div class="muted">${esc(meta.warNote)}</div>`;
+      html += esc(meta.warNote);
     }
-    if (meta.myLoc) html += `<div class="muted">${esc(meta.myLoc)}</div>`;
-    if (dupeOnPage) {
-      html += `<p class="err">Flight Watch is installed more than once. Remove the extra copies (in PDA: Settings > Userscripts) and keep only the one from GitHub.</p>`;
-    }
-    if (!cfg.apiKey) html += `<p class="err">Add an API key in Settings.</p>`;
-    else if (cfg.enemyMode === 'manual' && !cfg.factionId) html += `<p class="err">Add a faction ID in Settings, or switch Enemy to auto.</p>`;
-    if (lastError) html += `<p class="err">${esc(lastError)}</p>`;
+    if (meta.myLoc) html += `<br>${meta.myDest ? `${flag(meta.myDest, 14)} ` : ''}${esc(meta.myLoc)}`;
+    html += `</div>`;
+    if (dupeOnPage) html += `<div class="sec err">Flight Watch is installed more than once. Remove the extra copies (in PDA: Settings > Userscripts) and keep only the one from GitHub.</div>`;
+    if (!cfg.apiKey) html += `<div class="sec err">Add an API key in Settings.</div>`;
+    else if (cfg.enemyMode === 'manual' && !cfg.factionId) html += `<div class="sec err">Add a faction ID in Settings, or switch Enemy to auto.</div>`;
+    if (lastError) html += `<div class="sec err">${esc(lastError)}</div>`;
 
     if (showSettings) {
       html += renderSettings();
@@ -835,20 +938,52 @@
       html += renderDebug(state, meta, t);
     } else {
       const board = countryBoard(state, t);
-      html += `<h4>Countries <span class="muted" style="font-weight:normal">(tap a risky one for names)</span></h4><table>`;
-      for (const c of COUNTRIES) {
-        const b = board[c];
-        const me = meta.myDest === c ? ' me' : '';
-        html += `<tr class="c${me}" data-c="${esc(c)}"><td><b>${esc(c)}</b>${me ? ' <span class="muted">(you)</span>' : ''}<br><span class="muted">${esc(boardLine(b))}</span></td>`;
-        html += `<td style="text-align:right"><span class="tag ${b.risky ? 'risky' : 'safe'}">${b.risky ? 'RISKY' : 'SAFE'}</span></td></tr>`;
-        if (b.risky && (expanded.has(c) || meta.myDest === c)) {
-          [...b.there, ...b.hosp, ...b.inbound].forEach(([id, r]) => (html += memberRow(id, r, t, multi)));
+      // Risky countries first: yours on top, then soonest enemy landing / most enemies.
+      const risky = COUNTRIES.filter((c) => board[c].risky).sort((a, z) => {
+        if (a === meta.myDest) return -1;
+        if (z === meta.myDest) return 1;
+        const ba = board[a], bz = board[z];
+        const sa = ba.there.length * 100 + ba.inbound.length, sz = bz.there.length * 100 + bz.inbound.length;
+        return sz - sa;
+      });
+      const safe = COUNTRIES.filter((c) => !board[c].risky);
+
+      // Faction mates in danger.
+      if (cfg.showMates) {
+        const mates = matesInDanger(meta, board, t);
+        if (mates.length) {
+          html += `<div class="sec"><h4>Faction mates at risk (${mates.length})</h4>`;
+          mates.forEach(({ f }, i) => {
+            const where =
+              f.kind === 'there' ? `in ${esc(f.country)}`
+              : `flying to ${esc(f.country)}${f.eta ? `, lands ~${fmt(f.eta - t)}` : ''}`;
+            html += `<div class="mate">${flag(f.country)}<div class="info"><a href="https://www.torn.com/profiles.php?XID=${esc(f.player_id)}" target="_blank">${esc(f.name)}</a> <span class="muted">${esc(f.level)}</span><br><span class="muted">${where}</span></div><button data-warn="${i}">Warn</button></div>`;
+          });
+          html += `</div>`;
+        } else if (!meta.friends) {
+          html += `<div class="sec muted">Faction mate warnings need the Flight Watch server.</div>`;
         }
       }
-      html += `</table>`;
+
+      html += `<div class="sec"><h4>Risky (${risky.length})</h4>`;
+      if (!risky.length) html += `<div class="muted">No enemies abroad or flying right now.</div>`;
+      for (const c of risky) {
+        const b = board[c];
+        const me = meta.myDest === c;
+        const chips = [];
+        if (b.there.length) chips.push(`<span class="chip there">${b.there.length} there</span>`);
+        if (b.hosp.length) chips.push(`<span class="chip hosp">${b.hosp.length} in hosp</span>`);
+        if (b.inbound.length) chips.push(`<span class="chip in">${b.inbound.length} inbound${b.next !== null ? ` · next ${fmt(b.next)}` : ''}</span>`);
+        html += `<div class="card${me ? ' me' : ''}"><div class="top" data-c="${esc(c)}">${flag(c)}<span class="name">${esc(c)}${me ? ' <span class="muted">(you)</span>' : ''}</span><span class="muted">${expanded.has(c) || me ? '▾' : '▸'}</span></div><div class="chips">${chips.join('')}</div>`;
+        if (expanded.has(c) || me) {
+          html += `<div class="people"><table>${[...b.there, ...b.hosp, ...b.inbound].map(([id, r]) => memberRow(id, r, t, multi)).join('')}</table></div>`;
+        }
+        html += `</div>`;
+      }
+      html += `</div><div class="sec"><h4>Safe (${safe.length})</h4><div class="safe">${safe.map((c) => `<span class="${meta.myDest === c ? 'me' : ''}">${flag(c, 14)}${esc(DESTS[c].code)}</span>`).join('')}</div></div>`;
     }
     if (!showSettings) {
-      html += `<div style="margin-top:8px;display:flex;justify-content:space-between"><a href="#" id="ukw-refresh">Refresh now</a><a href="#" id="ukw-debug">${showDebug ? 'Back to countries' : 'Raw statuses'}</a></div>`;
+      html += `<div class="ft"><a href="#" id="ukw-refresh">Refresh now</a><a href="#" id="ukw-debug">${showDebug ? 'Back to countries' : 'Raw statuses'}</a></div>`;
     }
     panel.innerHTML = html;
 
@@ -862,14 +997,29 @@
       showSettings = !showSettings;
       render();
     };
-    panel.querySelectorAll('tr.c').forEach((tr) => {
-      tr.onclick = (e) => {
+    panel.querySelectorAll('[data-c]').forEach((el) => {
+      el.onclick = (e) => {
         if (e.target.closest('a')) return;
-        const c = tr.dataset.c;
+        const c = el.dataset.c;
         expanded.has(c) ? expanded.delete(c) : expanded.add(c);
         render();
       };
     });
+    if (!showSettings && !showDebug && cfg.showMates) {
+      const mates = matesInDanger(meta, countryBoard(state, t), t);
+      panel.querySelectorAll('[data-warn]').forEach((b) => {
+        b.onclick = () => {
+          const m = mates[Number(b.dataset.warn)];
+          if (!m) return;
+          const text = warningText(m.f, m.b, now());
+          const go = () => window.open(`https://www.torn.com/messages.php#/p=compose&XID=${encodeURIComponent(m.f.player_id)}`, '_blank');
+          copyText(text)
+            .then(() => toast(`Warning copied. Paste it into the message to ${m.f.name} and send.`))
+            .catch(() => toast(`Couldn't copy. The message: ${text}`))
+            .finally(go);
+        };
+      });
+    }
     const save = panel.querySelector('#ukw-save');
     if (save) {
       save.onclick = () => {
@@ -900,10 +1050,11 @@
       const b = board[meta.myDest];
       const n = b.there.length + b.hosp.length + b.inbound.length;
       btn.classList.add(b.risky ? 'risky' : 'safe');
-      btn.innerHTML = `${esc(DESTS[meta.myDest].code)}${n ? `<span class="n">${n}</span>` : ''}`;
+      btn.innerHTML = `${flag(meta.myDest, 16)}${esc(DESTS[meta.myDest].code)}${n ? `<span class="n">${n}</span>` : ''}`;
     } else {
       const risky = COUNTRIES.filter((c) => board[c].risky).length;
-      btn.innerHTML = `Fly${risky ? `<span class="n">${risky}</span>` : ''}`;
+      const mates = getCfg().showMates ? matesInDanger(meta, board, now()).length : 0;
+      btn.innerHTML = `Fly${risky ? `<span class="n" title="Risky countries">${risky}</span>` : ''}${mates ? `<span class="w" title="Faction mates at risk">${mates}</span>` : ''}`;
     }
   }
 

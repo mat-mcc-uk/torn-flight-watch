@@ -12,6 +12,8 @@ Tampermonkey checks this repo for updates on its own schedule.
 
 **Torn PDA:** add the script under Settings > Userscripts using the raw link. PDA fills in your API key automatically. On PDA 3.15 or later the script saves its data in PDA's native storage (the storage badge on the Userscripts page), so it doesn't compete with Torn and other scripts for the browser's small shared space and survives clearing the browser cache. PDA keeps its own settings, separate from your browser.
 
+![Flight Watch panel](docs/panel.png)
+
 ## What it does
 
 **Enemy factions**
@@ -19,7 +21,8 @@ Tampermonkey checks this repo for updates on its own schedule.
 - Fixed mode takes one or more faction IDs, comma separated.
 
 **Country board**
-- Lists all 11 destinations, each tagged SAFE or RISKY.
+- Risky countries come first, as cards with a flag and counts: enemies there, in hospital, and inbound with the next landing time. Your own country sits on top and opens automatically.
+- Safe countries fold into a row of flags underneath.
 - A country is risky when any enemy is there, in hospital there, or flying there. Enemies flying back to Torn don't count.
 - Tap a risky country to see names, plane types and landing countdowns.
 
@@ -27,6 +30,11 @@ Tampermonkey checks this repo for updates on its own schedule.
 - The script reads your own status, so it always knows the country you're in or flying to.
 - The button turns green or red for that country and shows how many enemies are there or on the way.
 - In Torn, the button shows how many countries are risky.
+
+**Faction mates at risk**
+- Lists faction mates who are in, or flying to, a country with enemies in it or on the way. This needs the server, which tracks your own faction's travel as well as the enemy's.
+- **Warn** copies a ready-made warning and opens a Torn message to that player. You paste it and press send. Torn's rules don't allow scripts to send messages on their own.
+- The button shows an orange count when any mates are at risk.
 
 **Alerts** (only for the country you're in or flying to)
 - Safe/risky summary when you take off somewhere

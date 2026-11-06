@@ -109,14 +109,21 @@ Deno.serve(async (req) => {
       await db.from("flight_watch_meta").update({ own_faction_id: ownId, enemies, war_checked_at: t }).eq("id", 1);
     }
 
-    const lists = await Promise.all(enemies.map((e) => torn(`faction/${e.id}/members?striptags=true`, key)));
+    // Enemy factions, plus our own faction (side 'friend') so the script can warn mates flying into danger.
+    const targets = [
+      ...enemies.map((e) => ({ id: e.id, name: e.name, side: "enemy" })),
+      ...(ownId ? [{ id: ownId, name: "own", side: "friend" }] : []),
+    ];
+    const lists = await Promise.all(
+      targets.map((f) => torn(f.side === "friend" ? "faction/members?striptags=true" : `faction/${f.id}/members?striptags=true`, key)),
+    );
 
     const { data: existing } = await db.from("flight_watch_members").select("*");
     const prevById = new Map<number, any>((existing ?? []).map((r: any) => [Number(r.player_id), r]));
 
     const rows: any[] = [];
     lists.forEach((data, i) => {
-      const fac = enemies[i];
+      const fac = targets[i];
       const raw = data?.members ?? [];
       const members = Array.isArray(raw) ? raw : Object.entries(raw).map(([id, m]: any) => ({ id: Number(id), ...m }));
       for (const m of members) {
@@ -143,6 +150,7 @@ Deno.serve(async (req) => {
         const biz_eta = loc.kind === "out" && plane === "airliner" && depart_at ? depart_at + DESTS[loc.country!].t[3] * 60 : null;
 
         rows.push({
+          side: fac.side,
           player_id: m.id,
           faction_id: fac.id,
           faction_name: fac.name,
@@ -174,7 +182,7 @@ Deno.serve(async (req) => {
     if (gone.length) await db.from("flight_watch_members").delete().in("player_id", gone);
 
     await db.from("flight_watch_meta").update({ last_poll: t, last_error: null }).eq("id", 1);
-    return new Response(JSON.stringify({ ok: true, enemies: enemies.length, members: rows.length }), {
+    return new Response(JSON.stringify({ ok: true, enemies: enemies.length, rows: rows.length }), {
       headers: { "Content-Type": "application/json" },
     });
   } catch (e) {
