@@ -53,6 +53,18 @@ Accuracy depends on the poll interval. At the default 30 seconds, takeoff times 
 
 Flight times live in the `DESTS` table at the top of the script.
 
+## Server (optional)
+
+Without the server, a flight only gets an ETA if someone's script saw it take off. The server closes that gap. It runs on Supabase and polls the enemy factions every 30 seconds around the clock, recording takeoff times.
+
+- `supabase/functions/flight-watch-poll`: called by `pg_cron` every 30 seconds. It works out who the faction is at war with, fetches their members and stores each player's location and estimated takeoff time.
+- `supabase/functions/flight-watch-read`: returns that data to the userscript. It needs the faction's read token, which goes in the script's Settings under **Server token**.
+- `supabase/migrations`: the tables and the cron job.
+
+The server uses one Public Torn API key, stored as the `TORN_API_KEY` edge function secret. The key must belong to a member of your faction, because it decides which wars count. The tables have row level security on and no public policies, so only the edge functions can read them.
+
+Flights the server timed show `(srv)` next to their countdown.
+
 ## API usage
 
 Everything works with a Public access key. Each poll makes one call for your own status plus one per enemy faction. The war lookup runs every 5 minutes. A single ranked war at the default 30-second poll uses about 5 calls a minute, well under Torn's 100-per-minute limit.

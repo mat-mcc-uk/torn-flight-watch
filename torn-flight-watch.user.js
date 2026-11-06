@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Flight Watch
 // @namespace    mcc.torn.ukwatch
-// @version      1.3.2
+// @version      1.4.0
 // @description  Watches the factions you're at war with, shows which countries are safe or risky, and alerts when enemies fly to, land in, or leave the country you're in or heading to.
 // @author       Ripcorder [4252513]
 // @match        https://www.torn.com/*
@@ -56,7 +56,12 @@
     alertLanded: true,
     alertLeave: false,
     alertArrive: true,         // summary of a country's risk when you start heading there
+    serverToken: '',           // read token for the faction's Flight Watch server (optional)
   };
+
+  // The server polls the enemy 24/7 and records takeoff times, so flights that left while
+  // nobody had Torn open still get an ETA.
+  const SERVER_URL = 'https://lwqcyivwyebhnqwubhuy.supabase.co/functions/v1/flight-watch-read';
 
   const TAB_ID = Math.random().toString(36).slice(2);
   const LEADER_TTL = 20;   // seconds before another tab takes over polling
@@ -290,11 +295,31 @@
         setMeta(Object.assign(getMeta(), { enemies, warNote: '' }));
       }
 
-      const [me, ...lists] = await Promise.all([
+      const serverReq = cfg.serverToken
+        ? fetch(SERVER_URL, { headers: { 'x-fw-token': cfg.serverToken } })
+            .then((r) => r.json().then((j) => (r.ok ? j : { error: j.error || `HTTP ${r.status}` })))
+            .catch((e) => ({ error: e && e.message ? e.message : 'unreachable' }))
+        : Promise.resolve(null);
+
+      const [me, srv, ...lists] = await Promise.all([
         api('user/basic?striptags=true', cfg.apiKey),
+        serverReq,
         ...enemies.map((e) => api(`faction/${encodeURIComponent(e.id)}/members?striptags=true`, cfg.apiKey)),
       ]);
       lastError = '';
+
+      // Server takeoff times, keyed by player.
+      const srvById = new Map();
+      let server = null;
+      if (srv) {
+        if (srv.error) {
+          server = { ok: false, error: srv.error };
+        } else {
+          (srv.members || []).forEach((r) => srvById.set(String(r.player_id), r));
+          const m = srv.meta || {};
+          server = { ok: !m.last_error, error: m.last_error || '', lastPoll: m.last_poll || 0, at: srv.now || t };
+        }
+      }
 
       // Where am I? Alerts only fire for the country I'm in or flying to.
       const myStatus = (me && me.profile && me.profile.status) || {};
@@ -362,6 +387,15 @@
           }
 
           if (loc.kind === 'out') {
+            // Prefer the server's takeoff time: it saw the flight even if no tab was open.
+            const sv = srvById.get(id);
+            if (sv && sv.kind === 'out' && sv.country === loc.country && sv.depart_at) {
+              rec.departAt = sv.depart_at;
+              rec.fromServer = true;
+              if (!rec.plane && sv.plane) rec.plane = sv.plane;
+            } else {
+              rec.fromServer = false;
+            }
             // Exact arrival if the API ever gives one, otherwise estimate from takeoff.
             const mins = flightMin(loc.country, rec.plane);
             if (s.until && s.until > t) rec.eta = s.until;
@@ -398,7 +432,7 @@
         const b = countryBoard(state, t)[myDest];
         alertOut(`${myDest}: ${b.risky ? 'RISKY' : 'safe'}`, boardLine(b));
       }
-      setMeta(Object.assign(getMeta(), { myDest, myLoc, myRaw: `${myStatus.state || ''}: ${myStatus.description || ''}`, debug }));
+      setMeta(Object.assign(getMeta(), { myDest, myLoc, myRaw: `${myStatus.state || ''}: ${myStatus.description || ''}`, debug, server }));
     } catch (e) {
       lastError = e && e.message ? e.message : 'Network error';
     }
@@ -475,6 +509,7 @@
         <div>Warn before landing (min)<input type="number" min="1" data-k="warnMin" value="${c.warnMin}"></div>
       </div>
       Discord webhook (optional)<input type="text" data-k="webhook" value="${esc(c.webhook)}">
+      Server token (optional, gives ETAs for flights you didn't see take off)<input type="text" data-k="serverToken" value="${esc(c.serverToken)}">
       <div class="muted" style="margin:4px 0">Alerts cover the country you're in or flying to:</div>
       ${chk('alertArrive', 'Safe/risky summary when you head somewhere')}
       ${chk('alertDepart', 'Enemy takes off for your country')}
@@ -487,7 +522,7 @@
   function memberRow(id, r, t, multi) {
     const link = `<a href="https://www.torn.com/profiles.php?XID=${id}" target="_blank">${esc(r.name)}</a> <span class="muted">${r.level}${multi && r.faction ? ` · ${esc(r.faction)}` : ''}</span>`;
     if (r.kind === 'out') {
-      const eta = r.eta ? fmt(r.eta - t) : '<span class="muted">ETA unknown</span>';
+      const eta = r.eta ? `${fmt(r.eta - t)}${r.fromServer ? ' <span class="muted" title="Takeoff time from the server">(srv)</span>' : ''}` : '<span class="muted">ETA unknown</span>';
       const biz = r.bizEta ? `<br><span class="muted">business: ${fmt(r.bizEta - t)}</span>` : '';
       return `<tr class="detail"><td>${link}<br><span class="muted">${planeLabel(r.plane)}</span></td><td style="text-align:right">${eta}${biz}</td></tr>`;
     }
@@ -501,6 +536,8 @@
     let h = `<h4>Raw statuses</h4>`;
     h += `<div class="muted">Storage: ${useGM ? 'Tampermonkey' : 'localStorage'}${IS_PDA ? ' (PDA)' : ''}. Last poll: ${d.at ? `${t - d.at}s ago` : 'never'}</div>`;
     h += `<div class="muted">You: ${esc(meta.myRaw || 'unknown')}</div>`;
+    const sv = meta.server;
+    h += `<div class="muted">Server: ${!sv ? 'not set up' : sv.ok ? `OK, last enemy poll ${Math.max(0, sv.at - sv.lastPoll)}s before your last check` : `<span class="err">${esc(sv.error)}</span>`}</div>`;
     (d.factions || []).forEach((f) => (h += `<div class="muted">${esc(f.name)} [${esc(f.id)}]: ${f.count} members fetched</div>`));
     const rows = Object.entries(state).filter(([id, r]) => id !== '_init' && String(r.rawState).toLowerCase() !== 'okay');
     h += `<table>`;
