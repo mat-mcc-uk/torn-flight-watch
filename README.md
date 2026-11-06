@@ -10,6 +10,8 @@ A Tampermonkey userscript for Torn City. It tracks the members of the factions y
 
 Tampermonkey checks this repo for updates on its own schedule.
 
+**Torn PDA:** add the script under Settings > Userscripts using the raw link. PDA fills in your API key automatically. PDA keeps its own settings, separate from your browser.
+
 ## What it does
 
 **Enemy factions**
@@ -56,6 +58,10 @@ Flight times live in the `DESTS` table at the top of the script.
 Everything works with a Public access key. Each poll makes one call for your own status plus one per enemy faction. The war lookup runs every 5 minutes. A single ranked war at the default 30-second poll uses about 5 calls a minute, well under Torn's 100-per-minute limit.
 
 Only one Torn tab polls at a time, so several open tabs don't double up the calls or the alerts.
+
+## Troubleshooting
+
+Tap **Raw statuses** at the bottom of the panel. It shows how many members were fetched for each watched faction, plus the exact state and description the API returned for every enemy who isn't sitting in Torn, next to how the script read it. If an enemy shows up there as `torn` when they're actually abroad or flying, the text didn't match a country.
 
 ## Known gaps
 

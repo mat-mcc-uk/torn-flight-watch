@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Flight Watch
 // @namespace    mcc.torn.ukwatch
-// @version      1.3.0
+// @version      1.3.1
 // @description  Watches the factions you're at war with, shows which countries are safe or risky, and alerts when enemies fly to, land in, or leave the country you're in or heading to.
 // @author       Ripcorder [4252513]
 // @match        https://www.torn.com/*
@@ -62,13 +62,53 @@
   const LEADER_TTL = 20;   // seconds before another tab takes over polling
   const WAR_CHECK = 300;   // seconds between war lookups in auto enemy mode
 
+  // ---------- Storage ----------
+  // Tampermonkey: GM storage. Torn PDA: its GM functions are missing or behave differently,
+  // so fall back to the page's localStorage, which every browser and PDA support.
+  const IS_PDA = typeof window.flutter_inappwebview !== 'undefined';
+  const useGM = (() => {
+    if (IS_PDA || typeof GM_getValue !== 'function' || typeof GM_setValue !== 'function') return false;
+    try {
+      const probe = GM_getValue('fw_probe', null);
+      return !(probe && typeof probe.then === 'function');
+    } catch (e) {
+      return false;
+    }
+  })();
+  const store = {
+    get(k, d) {
+      if (useGM) return GM_getValue(k, d);
+      try {
+        const v = localStorage.getItem(`fw:${k}`);
+        return v === null ? d : JSON.parse(v);
+      } catch (e) {
+        return d;
+      }
+    },
+    set(k, v) {
+      if (useGM) return GM_setValue(k, v);
+      try { localStorage.setItem(`fw:${k}`, JSON.stringify(v)); } catch (e) {}
+    },
+  };
+
+  // Torn PDA swaps this placeholder for the user's own key when it injects the script.
+  const PDA_KEY = '###PDA-APIKEY###';
+  const pdaKey = PDA_KEY.startsWith('#') ? '' : PDA_KEY;
+
   const now = () => Math.floor(Date.now() / 1000);
-  const getCfg = () => Object.assign({}, DEFAULTS, GM_getValue('ukw_cfg', {}));
-  const setCfg = (c) => GM_setValue('ukw_cfg', c);
-  const getState = () => GM_getValue('fw_state', {});
-  const setState = (s) => GM_setValue('fw_state', s);
-  const getMeta = () => Object.assign({ myDest: null, myLoc: '', enemies: [], warNote: '' }, GM_getValue('fw_meta', {}));
-  const setMeta = (m) => GM_setValue('fw_meta', m);
+  const getCfg = () => {
+    const c = Object.assign({}, DEFAULTS, store.get('ukw_cfg', {}));
+    if (!c.apiKey && pdaKey) c.apiKey = pdaKey;
+    return c;
+  };
+  const setCfg = (c) => store.set('ukw_cfg', c);
+  const getState = () => {
+    const s = store.get('fw_state', {});
+    return s && typeof s === 'object' ? s : {};
+  };
+  const setState = (s) => store.set('fw_state', s);
+  const getMeta = () => Object.assign({ myDest: null, myLoc: '', enemies: [], warNote: '' }, store.get('fw_meta', {}));
+  const setMeta = (m) => store.set('fw_meta', m);
 
   const esc = (t) => String(t).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   const fmt = (secs) => {
@@ -81,13 +121,29 @@
   const planeLabel = (p) => ({ light_aircraft: 'Airstrip', private_jet: 'Private (WLT)', airliner: 'Standard/Business' }[p] || 'Unknown plane');
 
   // Turn a status into a location: { kind: 'out' | 'there' | 'back' | 'torn', country, hosp }
+  // Matching is loose on purpose: any case, "Traveling" or "Travelling", and alternate country names.
+  const NAMES = {
+    'Cayman Islands': ['cayman'],
+    'UAE': ['uae', 'united arab emirates', 'dubai'],
+    'United Kingdom': ['united kingdom', 'london'],
+    'South Africa': ['south africa', 'johannesburg'],
+  };
+  const namesFor = (c) => NAMES[c] || [c.toLowerCase()];
   function parseLoc(s) {
-    const desc = (s && s.description) || '';
+    const state = String((s && s.state) || '').toLowerCase();
+    const desc = String((s && s.description) || '').toLowerCase();
+    const details = String((s && s.details) || '').toLowerCase();
+    const text = `${desc} ${details}`;
     for (const c of COUNTRIES) {
-      if (s.state === 'Traveling' && desc.includes(`Traveling to ${c}`)) return { kind: 'out', country: c };
-      if (s.state === 'Traveling' && desc.includes(`Returning to Torn from ${c}`)) return { kind: 'back', country: c };
-      if (s.state === 'Abroad' && desc.includes(`In ${c}`)) return { kind: 'there', country: c };
-      if (s.state === 'Hospital' && DESTS[c].adj.some((a) => desc.includes(`${a} hospital`))) return { kind: 'there', country: c, hosp: true };
+      const hit = namesFor(c).some((n) => text.includes(n));
+      if (state === 'traveling' || state === 'travelling') {
+        if (!hit) continue;
+        return /from|return/.test(desc) ? { kind: 'back', country: c } : { kind: 'out', country: c };
+      }
+      if (state === 'abroad' && hit) return { kind: 'there', country: c };
+      if (state === 'hospital' && DESTS[c].adj.some((a) => text.includes(`${a.toLowerCase()} hospital`))) {
+        return { kind: 'there', country: c, hosp: true };
+      }
     }
     return { kind: 'torn', country: null };
   }
@@ -121,27 +177,31 @@
   function alertOut(title, text, url) {
     const cfg = getCfg();
     try {
-      GM_notification({ title, text, timeout: 15000, onclick: () => url && window.open(url, '_blank') });
-    } catch (e) {
-      if (window.Notification && Notification.permission === 'granted') new Notification(title, { body: text });
-    }
+      if (typeof GM_notification === 'function' && !IS_PDA) {
+        GM_notification({ title, text, timeout: 15000, onclick: () => url && window.open(url, '_blank') });
+      } else if (window.Notification && Notification.permission === 'granted') {
+        new Notification(title, { body: text });
+      }
+    } catch (e) {}
     if (cfg.webhook) {
-      GM_xmlhttpRequest({
-        method: 'POST',
-        url: cfg.webhook,
-        headers: { 'Content-Type': 'application/json' },
-        data: JSON.stringify({ content: `**${title}**\n${text}${url ? `\n<${url}>` : ''}` }),
-      });
+      const body = JSON.stringify({ content: `**${title}**\n${text}${url ? `\n<${url}>` : ''}` });
+      try {
+        if (typeof GM_xmlhttpRequest === 'function' && !IS_PDA) {
+          GM_xmlhttpRequest({ method: 'POST', url: cfg.webhook, headers: { 'Content-Type': 'application/json' }, data: body });
+        } else {
+          fetch(cfg.webhook, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body }).catch(() => {});
+        }
+      } catch (e) {}
     }
     toast(`${title}: ${text}`);
   }
 
   // ---------- Leader election so only one tab polls ----------
   function amLeader() {
-    const l = GM_getValue('ukw_leader', null);
+    const l = store.get('ukw_leader', null);
     const t = now();
     if (!l || l.tab === TAB_ID || t - l.ts > LEADER_TTL) {
-      GM_setValue('ukw_leader', { tab: TAB_ID, ts: t });
+      store.set('ukw_leader', { tab: TAB_ID, ts: t });
       return true;
     }
     return false;
@@ -236,9 +296,14 @@
       const firstRun = !state._init;
       const seen = new Set();
 
+      const debug = { at: t, factions: [] };
       lists.forEach((data, i) => {
         const fac = enemies[i];
-        for (const m of (data && data.members) || []) {
+        // v2 returns an array; accept an id-keyed object too in case that ever changes.
+        const raw = (data && data.members) || [];
+        const members = Array.isArray(raw) ? raw : Object.entries(raw).map(([mid, mm]) => Object.assign({ id: Number(mid) }, mm));
+        debug.factions.push({ id: fac.id, name: fac.name, count: members.length });
+        for (const m of members) {
           const id = String(m.id);
           seen.add(id);
           const s = m.status || {};
@@ -255,6 +320,8 @@
           rec.country = loc.country;
           rec.hosp = !!loc.hosp;
           rec.hospUntil = loc.hosp ? s.until || null : null;
+          rec.rawState = s.state || '';
+          rec.rawDesc = s.description || '';
 
           const profile = `https://www.torn.com/profiles.php?XID=${id}`;
           const who = `${m.name} [${id}] (${fac.name})`;
@@ -315,7 +382,7 @@
         const b = countryBoard(state, t)[myDest];
         alertOut(`${myDest}: ${b.risky ? 'RISKY' : 'safe'}`, boardLine(b));
       }
-      setMeta(Object.assign(getMeta(), { myDest, myLoc }));
+      setMeta(Object.assign(getMeta(), { myDest, myLoc, myRaw: `${myStatus.state || ''}: ${myStatus.description || ''}`, debug }));
     } catch (e) {
       lastError = e && e.message ? e.message : 'Network error';
     }
@@ -348,7 +415,7 @@
   `;
   const style = document.createElement('style');
   style.textContent = css;
-  document.head.appendChild(style);
+  (document.head || document.documentElement).appendChild(style);
 
   const btn = document.createElement('div');
   btn.id = 'ukw-btn';
@@ -356,7 +423,7 @@
   panel.id = 'ukw-panel';
   const toastEl = document.createElement('div');
   toastEl.id = 'ukw-toast';
-  document.body.append(btn, panel, toastEl);
+  (document.body || document.documentElement).append(btn, panel, toastEl);
 
   let toastTimer;
   function toast(msg) {
@@ -367,6 +434,7 @@
   }
 
   let showSettings = false;
+  let showDebug = false;
   const expanded = new Set(); // countries opened in the board
   btn.onclick = () => {
     panel.style.display = panel.style.display === 'block' ? 'none' : 'block';
@@ -411,6 +479,22 @@
     return `<tr class="detail"><td>${link}</td><td style="text-align:right" class="muted">${note}</td></tr>`;
   }
 
+  // Shows exactly what the API returned for each enemy and how the script read it.
+  function renderDebug(state, meta, t) {
+    const d = meta.debug || {};
+    let h = `<h4>Raw statuses</h4>`;
+    h += `<div class="muted">Storage: ${useGM ? 'Tampermonkey' : 'localStorage'}${IS_PDA ? ' (PDA)' : ''}. Last poll: ${d.at ? `${t - d.at}s ago` : 'never'}</div>`;
+    h += `<div class="muted">You: ${esc(meta.myRaw || 'unknown')}</div>`;
+    (d.factions || []).forEach((f) => (h += `<div class="muted">${esc(f.name)} [${esc(f.id)}]: ${f.count} members fetched</div>`));
+    const rows = Object.entries(state).filter(([id, r]) => id !== '_init' && String(r.rawState).toLowerCase() !== 'okay');
+    h += `<table>`;
+    h += rows.length
+      ? rows.map(([id, r]) => `<tr><td><a href="https://www.torn.com/profiles.php?XID=${id}" target="_blank">${esc(r.name)}</a><br><span class="muted">${esc(r.rawState)}: ${esc(r.rawDesc)}</span></td><td style="text-align:right">${esc(r.kind)}${r.country ? `<br>${esc(r.country)}` : ''}</td></tr>`).join('')
+      : `<tr><td class="muted">Every watched enemy is Okay in Torn</td></tr>`;
+    h += `</table>`;
+    return h;
+  }
+
   function render() {
     if (panel.style.display !== 'block') return;
     const state = getState();
@@ -436,6 +520,8 @@
 
     if (showSettings) {
       html += renderSettings();
+    } else if (showDebug) {
+      html += renderDebug(state, meta, t);
     } else {
       const board = countryBoard(state, t);
       html += `<h4>Countries <span class="muted" style="font-weight:normal">(tap a risky one for names)</span></h4><table>`;
@@ -450,7 +536,15 @@
       }
       html += `</table>`;
     }
+    if (!showSettings) {
+      html += `<div style="margin-top:8px;display:flex;justify-content:space-between"><a href="#" id="ukw-refresh">Refresh now</a><a href="#" id="ukw-debug">${showDebug ? 'Back to countries' : 'Raw statuses'}</a></div>`;
+    }
     panel.innerHTML = html;
+
+    const dbg = panel.querySelector('#ukw-debug');
+    if (dbg) dbg.onclick = (e) => { e.preventDefault(); showDebug = !showDebug; render(); };
+    const rf = panel.querySelector('#ukw-refresh');
+    if (rf) rf.onclick = (e) => { e.preventDefault(); lastPoll = 0; forceWarCheck = true; store.set('ukw_leader', null); };
 
     panel.querySelector('#ukw-gear').onclick = (e) => {
       e.preventDefault();
