@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Flight Watch
 // @namespace    mcc.torn.ukwatch
-// @version      1.6.4
+// @version      1.6.5
 // @description  Watches the factions you're at war with, shows which countries are safe or risky, and alerts when enemies fly to, land in, or leave the country you're in or heading to.
 // @author       Ripcorder [4252513]
 // @match        https://www.torn.com/*
@@ -68,7 +68,7 @@
   const SERVER_KEY = 'sb_publishable_TZNmF4f4b2bWSC5zuUCqLQ_f5c3EYQf'; // publishable, safe to ship
   const SERVER_TOKEN = '6d975e385dde1a96370823b2';
 
-  const VERSION = '1.6.4'; // keep in step with @version so the panel shows what's actually running
+  const VERSION = '1.6.5'; // keep in step with @version so the panel shows what's actually running
   const TAB_ID = Math.random().toString(36).slice(2);
   const LEADER_TTL = 20;   // seconds before another tab takes over polling
   const WAR_CHECK = 300;   // seconds between war lookups in auto enemy mode
@@ -103,12 +103,26 @@
       }
     },
     set(k, v) {
+      const ok = () => {
+        delete mem[k];
+        if (storeError.startsWith(`${k}:`)) storeError = '';
+      };
       try {
         if (useGM) GM_setValue(k, v);
         else localStorage.setItem(`fw:${k}`, JSON.stringify(v));
-        delete mem[k];
-        if (storeError.startsWith(`${k}:`)) storeError = '';
+        ok();
       } catch (e) {
+        // Storage full: the old value still counts against the limit while it's being replaced, so
+        // remove it (and our own spare server copy) and try once more before giving up.
+        if (!useGM) {
+          try {
+            localStorage.removeItem(`fw:${k}`);
+            if (k !== 'fw_srv') localStorage.removeItem('fw:fw_srv');
+            localStorage.setItem(`fw:${k}`, JSON.stringify(v));
+            ok();
+            return;
+          } catch (e2) {}
+        }
         mem[k] = v;
         storeError = `${k}: ${(e && e.name) || 'save failed'}`;
       }
