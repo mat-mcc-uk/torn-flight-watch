@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Flight Watch
 // @namespace    mcc.torn.ukwatch
-// @version      1.6.1
+// @version      1.6.2
 // @description  Watches the factions you're at war with, shows which countries are safe or risky, and alerts when enemies fly to, land in, or leave the country you're in or heading to.
 // @author       Ripcorder [4252513]
 // @match        https://www.torn.com/*
@@ -68,6 +68,7 @@
   const SERVER_KEY = 'sb_publishable_TZNmF4f4b2bWSC5zuUCqLQ_f5c3EYQf'; // publishable, safe to ship
   const SERVER_TOKEN = '6d975e385dde1a96370823b2';
 
+  const VERSION = '1.6.2'; // keep in step with @version so the panel shows what's actually running
   const TAB_ID = Math.random().toString(36).slice(2);
   const LEADER_TTL = 20;   // seconds before another tab takes over polling
   const WAR_CHECK = 300;   // seconds between war lookups in auto enemy mode
@@ -416,7 +417,10 @@
         } else {
           const m = srv.meta || {};
           const age = t - (m.last_poll || 0);
-          server = { ok: !m.last_error, error: m.last_error || '', lastPoll: m.last_poll || 0, at: t, cached: !!srv.fromCache };
+          server = {
+            ok: !m.last_error, error: m.last_error || '', lastPoll: m.last_poll || 0, at: t, cached: !!srv.fromCache,
+            away: (srv.members || []).length, enemies: (m.enemies || []).length,
+          };
           // The server only tracks the war opponents, so fixed-faction mode always polls Torn directly.
           serverUsable = server.ok && age <= SERVER_FRESH && cfg.enemyMode === 'auto';
         }
@@ -712,6 +716,9 @@
     h += `<div class="muted">You: ${esc(meta.myRaw || 'unknown')}</div>`;
     const sv = meta.server;
     h += `<div class="muted">Server: ${!sv ? 'no reply yet' : !sv.ok ? `<span class="err">${esc(sv.error)}</span>` : sv.note ? esc(sv.note) : `OK, last enemy poll ${Math.max(0, sv.at - sv.lastPoll)}s before your last check`}</div>`;
+    if (sv && sv.ok && !sv.note) {
+      h += `<div class="muted">Server data: ${sv.away || 0} enemies away, ${sv.enemies || 0} faction(s), ${Math.max(0, sv.at - sv.lastPoll)}s old${sv.cached ? ' (saved copy)' : ''}</div>`;
+    }
     h += `<div class="muted">Enemy data from: ${d.source === 'server' ? 'server (your key only checks your own status)' : 'Torn API directly'}</div>`;
     (d.factions || []).forEach((f) => (h += `<div class="muted">${esc(f.name)} [${esc(f.id)}]: ${f.count} ${f.away ? 'away from Torn' : 'members fetched'}</div>`));
     const rows = Object.entries(state).filter(([id, r]) => !id.startsWith('_') && String(r.rawState).toLowerCase() !== 'okay');
@@ -731,7 +738,7 @@
     const t = now();
     const multi = (meta.enemies || []).length > 1;
 
-    let html = `<div style="display:flex;justify-content:space-between"><b>Flight Watch</b><a href="#" id="ukw-gear">${showSettings ? 'Close settings' : 'Settings'}</a></div>`;
+    let html = `<div style="display:flex;justify-content:space-between"><b>Flight Watch <span class="muted" style="font-weight:normal">v${VERSION}</span></b><a href="#" id="ukw-gear">${showSettings ? 'Close settings' : 'Settings'}</a></div>`;
     if (meta.enemies && meta.enemies.length) {
       const list = meta.enemies.map((e) => {
         const when = e.start && e.start > t ? `, starts in ${fmt(e.start - t)}` : '';
