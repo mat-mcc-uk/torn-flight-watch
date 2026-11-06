@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Flight Watch
 // @namespace    mcc.torn.ukwatch
-// @version      1.10.1
+// @version      1.11.0
 // @description  Watches the factions you're at war with, shows which countries are safe or risky, and alerts when enemies fly to, land in, or leave the country you're in or heading to.
 // @author       Ripcorder [4252513]
 // @match        https://www.torn.com/*
@@ -29,17 +29,17 @@
   // private_jet = private, airliner = standard OR business class.
   // adj = the word Torn uses for that country's hospital ("In a Japanese hospital").
   const DESTS = {
-    'Mexico':         { code: 'MEX', adj: ['Mexican'],                 t: [26, 18, 13, 8] },
-    'Cayman Islands': { code: 'CAY', adj: ['Caymanian'],               t: [35, 25, 18, 11] },
-    'Canada':         { code: 'CAN', adj: ['Canadian'],                t: [41, 29, 20, 12] },
-    'Hawaii':         { code: 'HAW', adj: ['Hawaiian'],                t: [134, 94, 67, 40] },
-    'United Kingdom': { code: 'UK',  adj: ['British'],                 t: [159, 111, 80, 48] },
-    'Argentina':      { code: 'ARG', adj: ['Argentinian', 'Argentine'], t: [167, 117, 83, 50] },
-    'Switzerland':    { code: 'SWI', adj: ['Swiss'],                   t: [175, 123, 88, 53] },
-    'Japan':          { code: 'JPN', adj: ['Japanese'],                t: [225, 158, 113, 68] },
-    'China':          { code: 'CHN', adj: ['Chinese'],                 t: [242, 169, 121, 72] },
-    'UAE':            { code: 'UAE', adj: ['Emirati', 'UAE'],          t: [271, 190, 135, 81] },
-    'South Africa':   { code: 'SA',  adj: ['South African'],           t: [297, 208, 149, 89] },
+    'Mexico':         { code: 'MEX', city: 'Ciudad Juarez', adj: ['Mexican'],                 t: [26, 18, 13, 8] },
+    'Cayman Islands': { code: 'CAY', city: 'George Town', adj: ['Caymanian'],               t: [35, 25, 18, 11] },
+    'Canada':         { code: 'CAN', city: 'Toronto', adj: ['Canadian'],                t: [41, 29, 20, 12] },
+    'Hawaii':         { code: 'HAW', city: 'Honolulu', adj: ['Hawaiian'],                t: [134, 94, 67, 40] },
+    'United Kingdom': { code: 'UK', city: 'London',  adj: ['British'],                 t: [159, 111, 80, 48] },
+    'Argentina':      { code: 'ARG', city: 'Buenos Aires', adj: ['Argentinian', 'Argentine'], t: [167, 117, 83, 50] },
+    'Switzerland':    { code: 'SWI', city: 'Zurich', adj: ['Swiss'],                   t: [175, 123, 88, 53] },
+    'Japan':          { code: 'JPN', city: 'Tokyo', adj: ['Japanese'],                t: [225, 158, 113, 68] },
+    'China':          { code: 'CHN', city: 'Beijing', adj: ['Chinese'],                 t: [242, 169, 121, 72] },
+    'UAE':            { code: 'UAE', city: 'Dubai', adj: ['Emirati', 'UAE'],          t: [271, 190, 135, 81] },
+    'South Africa':   { code: 'SA', city: 'Johannesburg',  adj: ['South African'],           t: [297, 208, 149, 89] },
   };
   const COUNTRIES = Object.keys(DESTS);
   const PLANE_INDEX = { airliner: 0, light_aircraft: 1, private_jet: 2 };
@@ -72,7 +72,7 @@
   const SERVER_KEY = 'sb_publishable_TZNmF4f4b2bWSC5zuUCqLQ_f5c3EYQf'; // publishable, safe to ship
   const SERVER_TOKEN = '6d975e385dde1a96370823b2';
 
-  const VERSION = '1.10.1'; // keep in step with @version so the panel shows what's actually running
+  const VERSION = '1.11.0'; // keep in step with @version so the panel shows what's actually running
   const TAB_ID = Math.random().toString(36).slice(2);
   const LEADER_TTL = 20;   // seconds before another tab takes over polling
   const WAR_CHECK = 300;   // seconds between war lookups in auto enemy mode
@@ -761,7 +761,7 @@
       }
       const friends = srv && !srv.error && !srv.throttled && Array.isArray(srv.friends) ? srv.friends : null;
       const myId = me && me.profile ? me.profile.id : null;
-      setMeta(Object.assign(getMeta(), { myDest, myLoc, myRaw: `${myStatus.state || ''}: ${myStatus.description || ''}`, debug, server, friends, myId }));
+      setMeta(Object.assign(getMeta(), { myDest, myKind: mine.kind, myLoc, myRaw: `${myStatus.state || ''}: ${myStatus.description || ''}`, debug, server, friends, myId }));
     } catch (e) {
       lastError = e && e.message ? e.message : 'Network error';
     } finally {
@@ -845,6 +845,8 @@
     #ukw-panel .safe{display:flex;flex-wrap:wrap;gap:6px}
     #ukw-panel .safe span{display:inline-flex;align-items:center;gap:4px;background:#1e2a22;border:1px solid #2c4a35;border-radius:12px;padding:2px 7px;color:#b8e6c4;font-size:11px}
     #ukw-panel .safe span.me{border-color:#6fb3ff}
+    #ukw-panel .safe span.go{cursor:pointer}
+    #ukw-panel .safe span.go:hover{background:#26402e;border-color:#3f7a52}
     #ukw-panel .mate{display:flex;align-items:center;gap:7px;padding:5px 0;border-bottom:1px solid #2c3036}
     #ukw-panel .mate .info{flex:1;min-width:0}
     #ukw-panel .mate button{margin:0;background:#8a4b0f;border-color:#e67e22}
@@ -1076,7 +1078,8 @@
         }
         html += `</div>`;
       }
-      html += `</div><div class="sec"><h4>Safe (${safe.length})</h4><div class="safe">${safe.map((c) => `<span class="${meta.myDest === c ? 'me' : ''}">${flag(c, 14)}${esc(DESTS[c].code)}</span>`).join('')}</div></div>`;
+      const canFly = !meta.myKind || meta.myKind === 'torn';
+      html += `</div><div class="sec"><h4>Safe (${safe.length}) <span class="muted" style="text-transform:none;letter-spacing:0;font-weight:normal">${canFly ? 'tap to fly' : ''}</span></h4><div class="safe">${safe.map((c) => `<span class="${meta.myDest === c ? 'me' : ''}${canFly ? ' go' : ''}" data-fly="${esc(c)}" title="${canFly ? `Open the travel agency with ${esc(c)} selected` : esc(c)}">${flag(c, 14)}${esc(DESTS[c].code)}</span>`).join('')}</div></div>`;
     }
     if (!showSettings) {
       html += `<div class="ft"><a href="#" id="ukw-refresh">Refresh now</a><a href="#" id="ukw-debug">${showDebug ? 'Back to countries' : 'Raw statuses'}</a></div>`;
@@ -1100,6 +1103,9 @@
         expanded.has(c) ? expanded.delete(c) : expanded.add(c);
         render();
       };
+    });
+    panel.querySelectorAll('[data-fly]').forEach((el) => {
+      el.onclick = () => bookFlight(el.dataset.fly, meta);
     });
     if (!showSettings && !showDebug && cfg.showMates) {
       const mates = matesInDanger(meta, countryBoard(state, t), t);
@@ -1157,6 +1163,85 @@
       const mates = getCfg().showMates ? matesInDanger(meta, board, now()).length : 0;
       btn.innerHTML = `Fly${risky ? `<span class="n" title="Risky countries">${risky}</span>` : ''}${mates ? `<span class="w" title="Faction mates at risk">${mates}</span>` : ''}`;
     }
+  }
+
+  // ---------- Book a flight ----------
+  // Tapping a safe country opens Torn's travel agency and selects that destination. The user still
+  // picks the ticket and presses Continue / Travel: the script never confirms a flight.
+  // Selectors come from Torn's current travel page (page.php?sid=travel): a destination list of
+  // buttons with aria-controls="travel-country-..." on mobile, and radio inputs named
+  // "destination" on the desktop world map. Both carry the country or city name.
+  const TRAVEL_URL = 'https://www.torn.com/page.php?sid=travel';
+  const onTravelPage = () => /sid=travel|travelagency\.php/.test(location.href);
+  function bookFlight(country, meta) {
+    if (meta && meta.myKind && meta.myKind !== 'torn') {
+      toast('You need to be back in Torn to book a flight.');
+      return;
+    }
+    store.set('fw_travel', { country, ts: now() });
+    if (native) flushNow();
+    if (onTravelPage()) selectDestination();
+    else location.href = TRAVEL_URL;
+  }
+  const destTerms = (c) => {
+    const d = DESTS[c];
+    const t = [c.toLowerCase(), d.city.toLowerCase()];
+    if (c === 'UAE') t.push('united arab emirates', 'uae');
+    if (c === 'Cayman Islands') t.push('cayman');
+    return t;
+  };
+  const norm = (x) => String(x || '').replace(/\s+/g, ' ').trim().toLowerCase();
+  function findDestinationControl(country) {
+    const terms = destTerms(country);
+    const matches = (txt) => terms.some((term) => txt.includes(term));
+    // Mobile list.
+    const listBtns = document.querySelectorAll('[class*="destinationList"] button[aria-controls^="travel-country-"], button[aria-controls^="travel-country-"]');
+    for (const b of listBtns) {
+      if (matches(norm(`${b.textContent} ${b.getAttribute('aria-label')} ${b.getAttribute('aria-controls')}`))) return b;
+    }
+    // Desktop map.
+    const radios = document.querySelectorAll('input[type="radio"][name="destination"], [class*="worldMap"] input[type="radio"]');
+    for (const r of radios) {
+      const label = r.closest('label');
+      if (matches(norm(`${r.getAttribute('aria-label')} ${r.value} ${label ? label.textContent : ''} ${label ? label.getAttribute('aria-label') : ''}`))) return r;
+    }
+    return null;
+  }
+  const realClick = (el) => {
+    for (const type of ['pointerdown', 'mousedown']) {
+      try { el.dispatchEvent(new MouseEvent(type, { bubbles: true })); } catch (e) {}
+    }
+    el.click();
+    for (const type of ['mouseup', 'pointerup']) {
+      try { el.dispatchEvent(new MouseEvent(type, { bubbles: true })); } catch (e) {}
+    }
+  };
+  let selecting = false;
+  function selectDestination() {
+    if (selecting || !onTravelPage()) return;
+    const p = store.get('fw_travel', null);
+    if (!p || !DESTS[p.country] || now() - (p.ts || 0) > 180) return;
+    selecting = true;
+    const started = Date.now();
+    const timer = setInterval(() => {
+      const ctl = findDestinationControl(p.country);
+      if (ctl) {
+        clearInterval(timer);
+        selecting = false;
+        store.set('fw_travel', null);
+        if (native) flushNow();
+        // Expanding an already open list row would close it again.
+        const open = ctl.getAttribute('aria-expanded') === 'true' || ctl.checked === true;
+        if (!open) realClick(ctl);
+        try { (ctl.closest('label') || ctl).scrollIntoView({ block: 'center' }); } catch (e) {}
+        toast(`${p.country} selected. Choose your ticket, then press Continue and Travel yourself.`);
+      } else if (Date.now() - started > 15000) {
+        clearInterval(timer);
+        selecting = false;
+        store.set('fw_travel', null);
+        toast(`Couldn't find ${p.country} on the travel page. Pick it yourself.`);
+      }
+    }, 300);
   }
 
   // ---------- Compose prefill ----------
@@ -1295,6 +1380,7 @@
 
   boot().then(() => {
     prefillCompose();
+    selectDestination();
     window.addEventListener('hashchange', prefillCompose);
     setInterval(() => {
       if (amLeader()) poll();

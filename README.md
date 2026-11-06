@@ -22,7 +22,7 @@ Tampermonkey checks this repo for updates on its own schedule.
 
 **Country board**
 - Risky countries come first, as cards with a flag and counts: enemies there, in hospital, and inbound with the next landing time. Your own country sits on top and opens automatically.
-- Safe countries fold into a row of flags underneath.
+- Safe countries fold into a row of flags underneath. Tap one while you're in Torn to open the travel agency with that destination already selected. You still choose the ticket and press Continue and Travel yourself.
 - A country is risky when any enemy is there, in hospital there, or flying there. Enemies flying back to Torn don't count.
 - Tap a risky country to see names, plane types and landing countdowns.
 
