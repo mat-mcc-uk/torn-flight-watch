@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Flight Watch
 // @namespace    mcc.torn.ukwatch
-// @version      1.10.0
+// @version      1.10.1
 // @description  Watches the factions you're at war with, shows which countries are safe or risky, and alerts when enemies fly to, land in, or leave the country you're in or heading to.
 // @author       Ripcorder [4252513]
 // @match        https://www.torn.com/*
@@ -72,7 +72,7 @@
   const SERVER_KEY = 'sb_publishable_TZNmF4f4b2bWSC5zuUCqLQ_f5c3EYQf'; // publishable, safe to ship
   const SERVER_TOKEN = '6d975e385dde1a96370823b2';
 
-  const VERSION = '1.10.0'; // keep in step with @version so the panel shows what's actually running
+  const VERSION = '1.10.1'; // keep in step with @version so the panel shows what's actually running
   const TAB_ID = Math.random().toString(36).slice(2);
   const LEADER_TTL = 20;   // seconds before another tab takes over polling
   const WAR_CHECK = 300;   // seconds between war lookups in auto enemy mode
@@ -1198,9 +1198,23 @@
     const sel = 'input[name="subject"], input#subject, input[name*="subject" i], input[placeholder*="subject" i], input[aria-label*="subject" i]';
     return [...document.querySelectorAll(sel)].find(visible) || null;
   }
-  // Look for the message box near the subject field, so Torn's chat box (also a visible textarea on
-  // every page) is never picked by mistake. Rich-text editors are checked before plain textareas.
-  const inChat = (el) => !!el.closest('[class*="chat" i], [id*="chat" i], #ukw-panel');
+  // Only ever look inside Torn's "Send a Message" box: the container that holds both the subject
+  // field and a Send button. An earlier version fell back to the whole page and wrote into the
+  // sidebar Notes box, because the subject field appears before the message editor has loaded.
+  const isEmpty = (b) => (b.kind === 'textarea' ? !b.el.value.trim() : !(b.el.textContent || '').trim());
+  const offLimits = (el) => !!el.closest('[class*="chat" i], [id*="chat" i], [class*="sidebar" i], [id*="sidebar" i], [class*="notes" i], [id*="notes" i], #ukw-panel');
+  function composeRoot(subj) {
+    if (!subj) return null;
+    let node = subj.parentElement;
+    for (let i = 0; node && i < 10; i++, node = node.parentElement) {
+      if (node === document.body) return null;
+      const send = [...node.querySelectorAll('button, input[type="submit"], input[type="button"], a, [role="button"]')].find(
+        (b) => /^\s*send\s*$/i.test(b.textContent || b.value || '')
+      );
+      if (send) return node;
+    }
+    return null;
+  }
   function editorIn(root) {
     for (const f of root.querySelectorAll('iframe')) {
       try {
@@ -1208,22 +1222,15 @@
         if (b && (b.isContentEditable || f.contentDocument.designMode === 'on') && visible(f)) return { el: b, kind: 'editable' };
       } catch (e) {}
     }
-    const ce = [...root.querySelectorAll('[contenteditable="true"], [contenteditable=""]')].find((x) => visible(x) && !inChat(x));
+    const ce = [...root.querySelectorAll('[contenteditable="true"], [contenteditable=""]')].find((x) => visible(x) && !offLimits(x));
     if (ce) return { el: ce, kind: 'editable' };
-    const ta = [...root.querySelectorAll('textarea')].find((x) => visible(x) && !inChat(x));
+    const ta = [...root.querySelectorAll('textarea')].find((x) => visible(x) && !offLimits(x));
     if (ta) return { el: ta, kind: 'textarea' };
     return null;
   }
   function findBody(subj) {
-    // Walk up from the subject field until a container also holds a message box.
-    if (subj) {
-      let node = subj.parentElement;
-      for (let i = 0; node && i < 8; i++, node = node.parentElement) {
-        const hit = editorIn(node);
-        if (hit) return hit;
-      }
-    }
-    return editorIn(document);
+    const root = composeRoot(subj);
+    return root ? editorIn(root) : null; // no compose box yet: keep waiting, never search the page
   }
   let prefillRunning = false;
   function prefillCompose() {
@@ -1240,6 +1247,12 @@
       if (body) {
         clearInterval(timer);
         if (subj && p.subject && !subj.value) setFieldValue(subj, p.subject);
+        // Never overwrite something the user has already typed.
+        if (!isEmpty(body)) {
+          prefillRunning = false;
+          toast('The message box already has text, so Flight Watch left it alone. The warning is on your clipboard.');
+          return;
+        }
         if (body.kind === 'textarea') setFieldValue(body.el, p.body);
         else setEditable(body.el, p.body);
         store.set('fw_pending', null);
