@@ -58,10 +58,13 @@ Flight times live in the `DESTS` table at the top of the script.
 Without the server, a flight only gets an ETA if someone's script saw it take off. The server closes that gap. It runs on Supabase and polls the enemy factions every 30 seconds around the clock, recording takeoff times.
 
 - `supabase/functions/flight-watch-poll`: called by `pg_cron` every 30 seconds. It works out who the faction is at war with, fetches their members and stores each player's location and estimated takeoff time.
-- `supabase/functions/flight-watch-read`: returns that data to the userscript. It needs the faction's read token, which goes in the script's Settings under **Server token**.
-- `supabase/migrations`: the tables and the cron job.
+- `flight_watch_read` (database function, in `supabase/migrations`): returns that data to the userscript through Supabase's REST API. It checks the faction read token and allows one fresh read per IP every 10 seconds. Reads this way don't count against the edge function quota.
+- `supabase/functions/flight-watch-read`: retired, kept only to tell old script versions to update.
+- `supabase/migrations`: the tables, the read function and the cron job.
 
-The server uses one Public Torn API key, stored as the `TORN_API_KEY` edge function secret. The key must belong to a member of your faction, because it decides which wars count. The tables have row level security on and no public policies, so only the edge functions can read them.
+The script ships with the read token and the project's publishable key built in, so nobody has to set anything up. The token only unlocks enemy positions, which all come from the public Torn API. To rotate it, run `update flight_watch_secrets set read_token = encode(gen_random_bytes(12), 'hex');`, then put the new value in `SERVER_TOKEN` and bump the version. Until people update, they can paste the new token into **Server token override** in Settings.
+
+The server uses one Public Torn API key, stored as the `TORN_API_KEY` edge function secret. The key must belong to a member of your faction, because it decides which wars count. The tables have row level security on and no public policies, so only the server functions can read them.
 
 Flights the server timed show `(srv)` next to their countdown.
 

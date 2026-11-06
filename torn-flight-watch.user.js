@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Flight Watch
 // @namespace    mcc.torn.ukwatch
-// @version      1.4.0
+// @version      1.5.0
 // @description  Watches the factions you're at war with, shows which countries are safe or risky, and alerts when enemies fly to, land in, or leave the country you're in or heading to.
 // @author       Ripcorder [4252513]
 // @match        https://www.torn.com/*
@@ -56,12 +56,15 @@
     alertLanded: true,
     alertLeave: false,
     alertArrive: true,         // summary of a country's risk when you start heading there
-    serverToken: '',           // read token for the faction's Flight Watch server (optional)
+    serverToken: '',           // leave blank to use the built-in token; paste a new one here after a rotation
   };
 
   // The server polls the enemy 24/7 and records takeoff times, so flights that left while
-  // nobody had Torn open still get an ETA.
-  const SERVER_URL = 'https://lwqcyivwyebhnqwubhuy.supabase.co/functions/v1/flight-watch-read';
+  // nobody had Torn open still get an ETA. Reads go through a database function that
+  // allows one fresh read per IP every 10 seconds.
+  const SERVER_URL = 'https://lwqcyivwyebhnqwubhuy.supabase.co/rest/v1/rpc/flight_watch_read';
+  const SERVER_KEY = 'sb_publishable_TZNmF4f4b2bWSC5zuUCqLQ_f5c3EYQf'; // publishable, safe to ship
+  const SERVER_TOKEN = '6d975e385dde1a96370823b2';
 
   const TAB_ID = Math.random().toString(36).slice(2);
   const LEADER_TTL = 20;   // seconds before another tab takes over polling
@@ -295,9 +298,20 @@
         setMeta(Object.assign(getMeta(), { enemies, warNote: '' }));
       }
 
-      const serverReq = cfg.serverToken
-        ? fetch(SERVER_URL, { headers: { 'x-fw-token': cfg.serverToken } })
-            .then((r) => r.json().then((j) => (r.ok ? j : { error: j.error || `HTTP ${r.status}` })))
+      const token = cfg.serverToken || SERVER_TOKEN;
+      const serverReq = token
+        ? fetch(SERVER_URL, {
+            method: 'POST',
+            headers: { apikey: SERVER_KEY, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ p_token: token }),
+          })
+            .then((r) => r.json().then((j) => (r.ok ? j : { error: (j && (j.message || j.error)) || `HTTP ${r.status}` })))
+            .then((j) => {
+              // Throttled (another device on the same connection read it a moment ago): reuse the last good copy.
+              if (j && j.throttled) return store.get('fw_srv', null) || j;
+              if (j && !j.error) store.set('fw_srv', j);
+              return j;
+            })
             .catch((e) => ({ error: e && e.message ? e.message : 'unreachable' }))
         : Promise.resolve(null);
 
@@ -314,6 +328,8 @@
       if (srv) {
         if (srv.error) {
           server = { ok: false, error: srv.error };
+        } else if (srv.throttled) {
+          server = { ok: true, error: '', lastPoll: 0, at: t, note: 'throttled, no cached copy yet' };
         } else {
           (srv.members || []).forEach((r) => srvById.set(String(r.player_id), r));
           const m = srv.meta || {};
@@ -509,7 +525,7 @@
         <div>Warn before landing (min)<input type="number" min="1" data-k="warnMin" value="${c.warnMin}"></div>
       </div>
       Discord webhook (optional)<input type="text" data-k="webhook" value="${esc(c.webhook)}">
-      Server token (optional, gives ETAs for flights you didn't see take off)<input type="text" data-k="serverToken" value="${esc(c.serverToken)}">
+      Server token override (leave blank to use the built-in one)<input type="text" data-k="serverToken" value="${esc(c.serverToken)}">
       <div class="muted" style="margin:4px 0">Alerts cover the country you're in or flying to:</div>
       ${chk('alertArrive', 'Safe/risky summary when you head somewhere')}
       ${chk('alertDepart', 'Enemy takes off for your country')}
@@ -537,7 +553,7 @@
     h += `<div class="muted">Storage: ${useGM ? 'Tampermonkey' : 'localStorage'}${IS_PDA ? ' (PDA)' : ''}. Last poll: ${d.at ? `${t - d.at}s ago` : 'never'}</div>`;
     h += `<div class="muted">You: ${esc(meta.myRaw || 'unknown')}</div>`;
     const sv = meta.server;
-    h += `<div class="muted">Server: ${!sv ? 'not set up' : sv.ok ? `OK, last enemy poll ${Math.max(0, sv.at - sv.lastPoll)}s before your last check` : `<span class="err">${esc(sv.error)}</span>`}</div>`;
+    h += `<div class="muted">Server: ${!sv ? 'no reply yet' : !sv.ok ? `<span class="err">${esc(sv.error)}</span>` : sv.note ? esc(sv.note) : `OK, last enemy poll ${Math.max(0, sv.at - sv.lastPoll)}s before your last check`}</div>`;
     (d.factions || []).forEach((f) => (h += `<div class="muted">${esc(f.name)} [${esc(f.id)}]: ${f.count} members fetched</div>`));
     const rows = Object.entries(state).filter(([id, r]) => id !== '_init' && String(r.rawState).toLowerCase() !== 'okay');
     h += `<table>`;
