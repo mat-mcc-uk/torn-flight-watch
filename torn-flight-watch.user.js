@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Flight Watch
 // @namespace    mcc.torn.ukwatch
-// @version      1.11.0
+// @version      1.11.1
 // @description  Watches the factions you're at war with, shows which countries are safe or risky, and alerts when enemies fly to, land in, or leave the country you're in or heading to.
 // @author       Ripcorder [4252513]
 // @match        https://www.torn.com/*
@@ -72,7 +72,7 @@
   const SERVER_KEY = 'sb_publishable_TZNmF4f4b2bWSC5zuUCqLQ_f5c3EYQf'; // publishable, safe to ship
   const SERVER_TOKEN = '6d975e385dde1a96370823b2';
 
-  const VERSION = '1.11.0'; // keep in step with @version so the panel shows what's actually running
+  const VERSION = '1.11.1'; // keep in step with @version so the panel shows what's actually running
   const TAB_ID = Math.random().toString(36).slice(2);
   const LEADER_TTL = 20;   // seconds before another tab takes over polling
   const WAR_CHECK = 300;   // seconds between war lookups in auto enemy mode
@@ -940,6 +940,10 @@
       h += `<div class="muted">Server data: ${sv.away || 0} enemies away, ${sv.enemies || 0} faction(s), ${(meta.friends || []).length} faction mates away, ${Math.max(0, sv.at - sv.lastPoll)}s old${sv.cached ? ' (saved copy)' : ''}</div>`;
     }
     h += `<div class="muted">FFScouter: ${!getCfg().showStats ? 'off' : ffError ? `<span class="err">${esc(ffError)}</span>` : `${Object.keys(ffCache()).length} estimate(s) cached`}</div>`;
+    const tr = store.get('fw_travel_report', null);
+    if (tr && tr.text) {
+      h += `<div class="muted">Travel page report (${esc(tr.country)}, ${fmt(t - tr.at)} ago) <a href="#" id="ukw-copyreport">Copy</a></div>`;
+    }
     h += `<div class="muted">Enemy data from: ${d.source === 'server' ? 'server (your key only checks your own status)' : 'Torn API directly'}</div>`;
     (d.factions || []).forEach((f) => (h += `<div class="muted">${esc(f.name)} [${esc(f.id)}]: ${f.count} ${f.away ? 'away from Torn' : 'members fetched'}</div>`));
     const rows = Object.entries(state).filter(([id, r]) => !id.startsWith('_') && String(r.rawState).toLowerCase() !== 'okay');
@@ -1086,6 +1090,15 @@
     }
     panel.innerHTML = html;
 
+    const cr = panel.querySelector('#ukw-copyreport');
+    if (cr) {
+      cr.onclick = (e) => {
+        e.preventDefault();
+        const tr = store.get('fw_travel_report', null);
+        if (!tr) return;
+        copyText(tr.text).then(() => toast('Travel report copied.')).catch(() => toast("Couldn't copy the report."));
+      };
+    }
     const dbg = panel.querySelector('#ukw-debug');
     if (dbg) dbg.onclick = (e) => { e.preventDefault(); showDebug = !showDebug; render(); };
     const rf = panel.querySelector('#ukw-refresh');
@@ -1191,21 +1204,67 @@
     return t;
   };
   const norm = (x) => String(x || '').replace(/\s+/g, ' ').trim().toLowerCase();
+  const PICK_SEL = 'button, [role="button"], [role="option"], [role="radio"], [role="menuitem"], [role="tab"], input[type="radio"], li, label, a, [aria-label], [title], [data-country], [data-destination]';
+  const travelOffLimits = (el) => !!el.closest('#ukw-panel, #ukw-btn, #ukw-toast, [class*="chat" i], [id*="chat" i], [class*="sidebar" i], [id*="sidebar" i]');
+  const elText = (el) => norm(`${el.getAttribute('aria-label') || ''} ${el.getAttribute('title') || ''} ${el.getAttribute('data-country') || ''} ${el.getAttribute('data-destination') || ''} ${el.value || ''} ${(el.textContent || '').slice(0, 120)}`);
+  // Which destination an element names, if it names exactly one (containers that mention several
+  // countries, like the whole map or list, don't count).
+  function namesCountry(el) {
+    const txt = elText(el);
+    const hits = COUNTRIES.filter((c) => destTerms(c).some((term) => txt.includes(term)));
+    return hits.length === 1 ? hits[0] : null;
+  }
+  const isNeverClick = (el) => /^(continue|travel|fly|book|confirm|yes)\b|travel to /.test(norm(el.textContent || el.value || el.getAttribute('aria-label') || ''));
+
   function findDestinationControl(country) {
     const terms = destTerms(country);
     const matches = (txt) => terms.some((term) => txt.includes(term));
-    // Mobile list.
-    const listBtns = document.querySelectorAll('[class*="destinationList"] button[aria-controls^="travel-country-"], button[aria-controls^="travel-country-"]');
-    for (const b of listBtns) {
-      if (matches(norm(`${b.textContent} ${b.getAttribute('aria-label')} ${b.getAttribute('aria-controls')}`))) return b;
+    // 1. Mobile list (one layout of page.php?sid=travel).
+    for (const b of document.querySelectorAll('button[aria-controls^="travel-country-"]')) {
+      if (matches(norm(`${b.textContent} ${b.getAttribute('aria-label')} ${b.getAttribute('aria-controls')}`))) return { el: b };
     }
-    // Desktop map.
-    const radios = document.querySelectorAll('input[type="radio"][name="destination"], [class*="worldMap"] input[type="radio"]');
-    for (const r of radios) {
+    // 2. Desktop map radios.
+    for (const r of document.querySelectorAll('input[type="radio"][name="destination"], [class*="worldMap"] input[type="radio"]')) {
       const label = r.closest('label');
-      if (matches(norm(`${r.getAttribute('aria-label')} ${r.value} ${label ? label.textContent : ''} ${label ? label.getAttribute('aria-label') : ''}`))) return r;
+      if (matches(norm(`${r.getAttribute('aria-label')} ${r.value} ${label ? label.textContent : ''} ${label ? label.getAttribute('aria-label') : ''}`))) return { el: r };
+    }
+    // 3. Anything else on the page that names exactly this country: map pins, dropdown options.
+    //    The smallest such element wins, so a whole row or panel isn't clicked by accident.
+    let best = null;
+    for (const el of document.querySelectorAll(PICK_SEL)) {
+      if (travelOffLimits(el) || isNeverClick(el) || namesCountry(el) !== country) continue;
+      if (!visible(el) && el.tagName !== 'INPUT') continue;
+      const size = (el.textContent || '').length;
+      if (!best || size < best.size) best = { el, size };
+    }
+    return best ? { el: best.el } : null;
+  }
+  // The "Torn -> Japan >" style selector: a control that shows the current destination. Tapping it
+  // opens the list of destinations.
+  function findDestinationOpener(country) {
+    for (const el of document.querySelectorAll('button, [role="button"], [aria-haspopup], [aria-expanded], [class*="destination" i], [class*="select" i]')) {
+      if (travelOffLimits(el) || isNeverClick(el) || !visible(el)) continue;
+      const c = namesCountry(el);
+      if (c && c !== country && (el.matches('button, [role="button"], [aria-haspopup], [aria-expanded]') || el.querySelector('svg, i, [class*="arrow" i], [class*="chevron" i]'))) return el;
     }
     return null;
+  }
+  // What the travel page offers, for a bug report when nothing matched.
+  function travelReport() {
+    const lines = [`URL: ${location.pathname}${location.search}`, `Width: ${window.innerWidth}`];
+    const seen = new Set();
+    for (const el of document.querySelectorAll('*')) {
+      if (lines.length > 45 || seen.has(el) || /^(SCRIPT|STYLE|NOSCRIPT|TEMPLATE)$/.test(el.tagName) || travelOffLimits(el)) continue;
+      const own = norm(`${el.getAttribute('aria-label') || ''} ${el.getAttribute('title') || ''} ${el.value || ''} ${[...el.childNodes].filter((n) => n.nodeType === 3).map((n) => n.textContent).join(' ')}`);
+      if (!own || !COUNTRIES.some((c) => destTerms(c).some((term) => own.includes(term)))) continue;
+      seen.add(el);
+      const attrs = ['role', 'name', 'type', 'value', 'aria-label', 'aria-controls', 'aria-expanded', 'aria-haspopup', 'data-country', 'title']
+        .filter((a) => el.getAttribute(a)).map((a) => `${a}="${String(el.getAttribute(a)).slice(0, 40)}"`).join(' ');
+      const cls = typeof el.className === 'string' ? el.className.split(/\s+/).slice(0, 2).join('.') : '';
+      const parent = el.parentElement ? `${el.parentElement.tagName.toLowerCase()}${typeof el.parentElement.className === 'string' && el.parentElement.className ? '.' + el.parentElement.className.split(/\s+/)[0] : ''}` : '';
+      lines.push(`${el.tagName.toLowerCase()}${cls ? '.' + cls : ''} ${attrs} "${own.slice(0, 40)}" < ${parent}`);
+    }
+    return lines.join('\n');
   }
   const realClick = (el) => {
     for (const type of ['pointerdown', 'mousedown']) {
@@ -1223,25 +1282,38 @@
     if (!p || !DESTS[p.country] || now() - (p.ts || 0) > 180) return;
     selecting = true;
     const started = Date.now();
+    let openedAt = 0;
+    const done = (msg) => {
+      clearInterval(timer);
+      selecting = false;
+      store.set('fw_travel', null);
+      if (native) flushNow();
+      toast(msg);
+    };
     const timer = setInterval(() => {
-      const ctl = findDestinationControl(p.country);
-      if (ctl) {
-        clearInterval(timer);
-        selecting = false;
-        store.set('fw_travel', null);
-        if (native) flushNow();
-        // Expanding an already open list row would close it again.
-        const open = ctl.getAttribute('aria-expanded') === 'true' || ctl.checked === true;
+      const hit = findDestinationControl(p.country);
+      if (hit) {
+        const ctl = hit.el;
+        const open = ctl.getAttribute('aria-expanded') === 'true' || ctl.checked === true || ctl.getAttribute('aria-selected') === 'true';
         if (!open) realClick(ctl);
         try { (ctl.closest('label') || ctl).scrollIntoView({ block: 'center' }); } catch (e) {}
-        toast(`${p.country} selected. Choose your ticket, then press Continue and Travel yourself.`);
-      } else if (Date.now() - started > 15000) {
-        clearInterval(timer);
-        selecting = false;
-        store.set('fw_travel', null);
-        toast(`Couldn't find ${p.country} on the travel page. Pick it yourself.`);
+        done(`${p.country} selected. Choose your ticket, then press Continue and Travel yourself.`);
+        return;
       }
-    }, 300);
+      // Nothing named this country yet: open the destination selector once, then keep looking.
+      if (!openedAt) {
+        const opener = findDestinationOpener(p.country);
+        if (opener) {
+          openedAt = Date.now();
+          realClick(opener);
+          return;
+        }
+      }
+      if (Date.now() - started > 15000) {
+        store.set('fw_travel_report', { at: now(), country: p.country, text: travelReport() });
+        done(`Couldn't find ${p.country} on the travel page. Pick it yourself, and if you can, send the travel report from Raw statuses.`);
+      }
+    }, 400);
   }
 
   // ---------- Compose prefill ----------
