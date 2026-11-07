@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Flight Watch
 // @namespace    mcc.torn.ukwatch
-// @version      1.11.1
+// @version      1.11.2
 // @description  Watches the factions you're at war with, shows which countries are safe or risky, and alerts when enemies fly to, land in, or leave the country you're in or heading to.
 // @author       Ripcorder [4252513]
 // @match        https://www.torn.com/*
@@ -72,7 +72,7 @@
   const SERVER_KEY = 'sb_publishable_TZNmF4f4b2bWSC5zuUCqLQ_f5c3EYQf'; // publishable, safe to ship
   const SERVER_TOKEN = '6d975e385dde1a96370823b2';
 
-  const VERSION = '1.11.1'; // keep in step with @version so the panel shows what's actually running
+  const VERSION = '1.11.2'; // keep in step with @version so the panel shows what's actually running
   const TAB_ID = Math.random().toString(36).slice(2);
   const LEADER_TTL = 20;   // seconds before another tab takes over polling
   const WAR_CHECK = 300;   // seconds between war lookups in auto enemy mode
@@ -1178,6 +1178,48 @@
     }
   }
 
+  // ---------- Page helpers ----------
+  // Areas the script must never touch: its own UI, Torn's sidebar (which holds Notes) and chat.
+  // Matched by Torn's container ids, and by class names only on wrappers *inside* the page content.
+  // An earlier version matched any ancestor whose class contained "sidebar"/"chat", which can
+  // include Torn's outer page wrapper and so ruled out the whole page.
+  const OFF_IDS = '#ukw-panel, #ukw-btn, #ukw-toast, #sidebarroot, #sidebar, #chatRoot, [id^="chat-root"], [id^="chatRoot"]';
+  const OFF_CLASS = /(^|[\s_-])(chat|sidebar|notes?)([\s_-]|$)/i;
+  const CONTENT_SEL = '.content-wrapper, #mainContainer, [role="main"], main, .content';
+  let offStats = { byId: 0, byClass: 0 };
+  function offArea(el) {
+    if (el.closest(OFF_IDS)) {
+      offStats.byId++;
+      return true;
+    }
+    const content = el.closest(CONTENT_SEL);
+    let a = el;
+    for (let i = 0; a && i < 12; i++, a = a.parentElement) {
+      if (a === document.body || a === document.documentElement) break;
+      if (content && a.contains(content)) break; // an outer wrapper of the page content: ignore
+      const cls = typeof a.className === 'string' ? a.className : (a.getAttribute && a.getAttribute('class')) || '';
+      if (OFF_CLASS.test(cls) || OFF_CLASS.test(a.id || '')) {
+        offStats.byClass++;
+        return true;
+      }
+    }
+    return false;
+  }
+  // querySelectorAll that also looks inside open shadow roots and same-origin iframes.
+  function deepAll(sel, root = document, out = [], depth = 0) {
+    if (depth > 4) return out;
+    try { out.push(...root.querySelectorAll(sel)); } catch (e) {}
+    let all = [];
+    try { all = root.querySelectorAll('*'); } catch (e) {}
+    for (const el of all) {
+      if (el.shadowRoot) deepAll(sel, el.shadowRoot, out, depth + 1);
+      if (el.tagName === 'IFRAME') {
+        try { if (el.contentDocument) deepAll(sel, el.contentDocument, out, depth + 1); } catch (e) {}
+      }
+    }
+    return out;
+  }
+
   // ---------- Book a flight ----------
   // Tapping a safe country opens Torn's travel agency and selects that destination. The user still
   // picks the ticket and presses Continue / Travel: the script never confirms a flight.
@@ -1205,7 +1247,7 @@
   };
   const norm = (x) => String(x || '').replace(/\s+/g, ' ').trim().toLowerCase();
   const PICK_SEL = 'button, [role="button"], [role="option"], [role="radio"], [role="menuitem"], [role="tab"], input[type="radio"], li, label, a, [aria-label], [title], [data-country], [data-destination]';
-  const travelOffLimits = (el) => !!el.closest('#ukw-panel, #ukw-btn, #ukw-toast, [class*="chat" i], [id*="chat" i], [class*="sidebar" i], [id*="sidebar" i]');
+  const travelOffLimits = (el) => offArea(el);
   const elText = (el) => norm(`${el.getAttribute('aria-label') || ''} ${el.getAttribute('title') || ''} ${el.getAttribute('data-country') || ''} ${el.getAttribute('data-destination') || ''} ${el.value || ''} ${(el.textContent || '').slice(0, 120)}`);
   // Which destination an element names, if it names exactly one (containers that mention several
   // countries, like the whole map or list, don't count).
@@ -1220,18 +1262,18 @@
     const terms = destTerms(country);
     const matches = (txt) => terms.some((term) => txt.includes(term));
     // 1. Mobile list (one layout of page.php?sid=travel).
-    for (const b of document.querySelectorAll('button[aria-controls^="travel-country-"]')) {
+    for (const b of deepAll('button[aria-controls^="travel-country-"]')) {
       if (matches(norm(`${b.textContent} ${b.getAttribute('aria-label')} ${b.getAttribute('aria-controls')}`))) return { el: b };
     }
     // 2. Desktop map radios.
-    for (const r of document.querySelectorAll('input[type="radio"][name="destination"], [class*="worldMap"] input[type="radio"]')) {
+    for (const r of deepAll('input[type="radio"][name="destination"], [class*="worldMap"] input[type="radio"]')) {
       const label = r.closest('label');
       if (matches(norm(`${r.getAttribute('aria-label')} ${r.value} ${label ? label.textContent : ''} ${label ? label.getAttribute('aria-label') : ''}`))) return { el: r };
     }
     // 3. Anything else on the page that names exactly this country: map pins, dropdown options.
     //    The smallest such element wins, so a whole row or panel isn't clicked by accident.
     let best = null;
-    for (const el of document.querySelectorAll(PICK_SEL)) {
+    for (const el of deepAll(PICK_SEL)) {
       if (travelOffLimits(el) || isNeverClick(el) || namesCountry(el) !== country) continue;
       if (!visible(el) && el.tagName !== 'INPUT') continue;
       const size = (el.textContent || '').length;
@@ -1242,7 +1284,7 @@
   // The "Torn -> Japan >" style selector: a control that shows the current destination. Tapping it
   // opens the list of destinations.
   function findDestinationOpener(country) {
-    for (const el of document.querySelectorAll('button, [role="button"], [aria-haspopup], [aria-expanded], [class*="destination" i], [class*="select" i]')) {
+    for (const el of deepAll('button, [role="button"], [aria-haspopup], [aria-expanded], [class*="destination" i], [class*="select" i]')) {
       if (travelOffLimits(el) || isNeverClick(el) || !visible(el)) continue;
       const c = namesCountry(el);
       if (c && c !== country && (el.matches('button, [role="button"], [aria-haspopup], [aria-expanded]') || el.querySelector('svg, i, [class*="arrow" i], [class*="chevron" i]'))) return el;
@@ -1251,10 +1293,24 @@
   }
   // What the travel page offers, for a bug report when nothing matched.
   function travelReport() {
-    const lines = [`URL: ${location.pathname}${location.search}`, `Width: ${window.innerWidth}`];
+    offStats = { byId: 0, byClass: 0 };
+    const everything = deepAll('*');
+    const shadows = everything.filter((el) => el.shadowRoot).length;
+    const frames = everything.filter((el) => el.tagName === 'IFRAME').length;
+    const named = everything.filter((el) => {
+      const own = norm([...el.childNodes].filter((n) => n.nodeType === 3).map((n) => n.textContent).join(' '));
+      return own && COUNTRIES.some((c) => destTerms(c).some((term) => own.includes(term)));
+    });
+    const lines = [
+      `URL: ${location.pathname}${location.search}`,
+      `Width: ${window.innerWidth} | elements: ${everything.length} | shadow roots: ${shadows} | iframes: ${frames}`,
+      `Elements naming a country: ${named.length} | body class: ${String(document.body && document.body.className).slice(0, 60)}`,
+    ];
+    const sampleOff = named.slice(0, 40).filter((el) => offArea(el)).length;
+    lines.push(`Ruled out as sidebar/chat: ${sampleOff} (by id ${offStats.byId}, by class ${offStats.byClass})`);
     const seen = new Set();
-    for (const el of document.querySelectorAll('*')) {
-      if (lines.length > 45 || seen.has(el) || /^(SCRIPT|STYLE|NOSCRIPT|TEMPLATE)$/.test(el.tagName) || travelOffLimits(el)) continue;
+    for (const el of everything) {
+      if (lines.length > 50 || seen.has(el) || /^(SCRIPT|STYLE|NOSCRIPT|TEMPLATE)$/.test(el.tagName) || el.closest('#ukw-panel, #ukw-btn, #ukw-toast')) continue;
       const own = norm(`${el.getAttribute('aria-label') || ''} ${el.getAttribute('title') || ''} ${el.value || ''} ${[...el.childNodes].filter((n) => n.nodeType === 3).map((n) => n.textContent).join(' ')}`);
       if (!own || !COUNTRIES.some((c) => destTerms(c).some((term) => own.includes(term)))) continue;
       seen.add(el);
@@ -1262,7 +1318,12 @@
         .filter((a) => el.getAttribute(a)).map((a) => `${a}="${String(el.getAttribute(a)).slice(0, 40)}"`).join(' ');
       const cls = typeof el.className === 'string' ? el.className.split(/\s+/).slice(0, 2).join('.') : '';
       const parent = el.parentElement ? `${el.parentElement.tagName.toLowerCase()}${typeof el.parentElement.className === 'string' && el.parentElement.className ? '.' + el.parentElement.className.split(/\s+/)[0] : ''}` : '';
-      lines.push(`${el.tagName.toLowerCase()}${cls ? '.' + cls : ''} ${attrs} "${own.slice(0, 40)}" < ${parent}`);
+      let chain = '';
+      for (let a = el.parentElement, i = 0; a && i < 4; a = a.parentElement, i++) {
+        const c = typeof a.className === 'string' && a.className ? '.' + a.className.split(/\s+/)[0] : '';
+        chain += ` < ${a.tagName.toLowerCase()}${a.id ? '#' + a.id : ''}${c}`;
+      }
+      lines.push(`${offArea(el) ? '[OFF] ' : ''}${el.tagName.toLowerCase()}${cls ? '.' + cls : ''} ${attrs} "${own.slice(0, 30)}"${chain}`);
     }
     return lines.join('\n');
   }
@@ -1359,7 +1420,7 @@
   // field and a Send button. An earlier version fell back to the whole page and wrote into the
   // sidebar Notes box, because the subject field appears before the message editor has loaded.
   const isEmpty = (b) => (b.kind === 'textarea' ? !b.el.value.trim() : !(b.el.textContent || '').trim());
-  const offLimits = (el) => !!el.closest('[class*="chat" i], [id*="chat" i], [class*="sidebar" i], [id*="sidebar" i], [class*="notes" i], [id*="notes" i], #ukw-panel');
+  const offLimits = (el) => offArea(el);
   function composeRoot(subj) {
     if (!subj) return null;
     let node = subj.parentElement;
