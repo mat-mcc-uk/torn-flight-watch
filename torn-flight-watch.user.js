@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Flight Watch
 // @namespace    mcc.torn.ukwatch
-// @version      1.11.2
+// @version      1.11.4
 // @description  Watches the factions you're at war with, shows which countries are safe or risky, and alerts when enemies fly to, land in, or leave the country you're in or heading to.
 // @author       Ripcorder [4252513]
 // @match        https://www.torn.com/*
@@ -72,7 +72,7 @@
   const SERVER_KEY = 'sb_publishable_TZNmF4f4b2bWSC5zuUCqLQ_f5c3EYQf'; // publishable, safe to ship
   const SERVER_TOKEN = '6d975e385dde1a96370823b2';
 
-  const VERSION = '1.11.2'; // keep in step with @version so the panel shows what's actually running
+  const VERSION = '1.11.4'; // keep in step with @version so the panel shows what's actually running
   const TAB_ID = Math.random().toString(36).slice(2);
   const LEADER_TTL = 20;   // seconds before another tab takes over polling
   const WAR_CHECK = 300;   // seconds between war lookups in auto enemy mode
@@ -1228,15 +1228,21 @@
   // "destination" on the desktop world map. Both carry the country or city name.
   const TRAVEL_URL = 'https://www.torn.com/page.php?sid=travel';
   const onTravelPage = () => /sid=travel|travelagency\.php/.test(location.href);
+  // The chosen country travels in the link (#fwdest=...). An earlier version passed it through
+  // storage only; in PDA that write finishes in the background, the page changed first, and the
+  // travel page read the previous choice ("always one behind").
   function bookFlight(country, meta) {
     if (meta && meta.myKind && meta.myKind !== 'torn') {
       toast('You need to be back in Torn to book a flight.');
       return;
     }
-    store.set('fw_travel', { country, ts: now() });
+    if (onTravelPage()) {
+      selectDestination(country);
+      return;
+    }
+    store.set('fw_travel', { country, ts: now() }); // backup only, in case the link loses the hash
     if (native) flushNow();
-    if (onTravelPage()) selectDestination();
-    else location.href = TRAVEL_URL;
+    location.href = `${TRAVEL_URL}#fwdest=${encodeURIComponent(country)}`;
   }
   const destTerms = (c) => {
     const d = DESTS[c];
@@ -1283,13 +1289,46 @@
   }
   // The "Torn -> Japan >" style selector: a control that shows the current destination. Tapping it
   // opens the list of destinations.
-  function findDestinationOpener(country) {
-    for (const el of deepAll('button, [role="button"], [aria-haspopup], [aria-expanded], [class*="destination" i], [class*="select" i]')) {
+  const OPENER_SEL = 'button, [role="button"], [role="combobox"], [aria-haspopup], [aria-expanded], [class*="destination" i], [class*="select" i]';
+  function openerCandidates() {
+    const out = [];
+    for (const el of deepAll(OPENER_SEL)) {
       if (travelOffLimits(el) || isNeverClick(el) || !visible(el)) continue;
       const c = namesCountry(el);
-      if (c && c !== country && (el.matches('button, [role="button"], [aria-haspopup], [aria-expanded]') || el.querySelector('svg, i, [class*="arrow" i], [class*="chevron" i]'))) return el;
+      if (!c) continue;
+      const looksLikeOpener = el.matches('button, [role="button"], [role="combobox"], [aria-haspopup], [aria-expanded]') || el.querySelector('svg, i, [class*="arrow" i], [class*="chevron" i]');
+      if (looksLikeOpener) out.push({ el, country: c });
     }
-    return null;
+    // Innermost first, so a button wins over the panel around it.
+    out.sort((a, z) => (a.el.textContent || '').length - (z.el.textContent || '').length);
+    return out;
+  }
+  function findDestinationOpener(country) {
+    const o = openerCandidates().find((x) => x.country !== country);
+    return o ? o.el : null;
+  }
+  // The destination the page currently shows as selected, if it has such a display.
+  function currentDestination() {
+    const o = openerCandidates()[0];
+    return o ? o.country : null;
+  }
+  const describe = (el) => {
+    const cls = typeof el.className === 'string' && el.className ? '.' + el.className.split(/\s+/).slice(0, 2).join('.') : '';
+    const attrs = ['role', 'aria-label', 'aria-controls', 'aria-expanded', 'aria-haspopup', 'name', 'value']
+      .filter((a) => el.getAttribute && el.getAttribute(a)).map((a) => `${a}="${String(el.getAttribute(a)).slice(0, 30)}"`).join(' ');
+    return `${el.tagName.toLowerCase()}${cls} ${attrs} "${norm(el.textContent).slice(0, 30)}"`;
+  };
+  // Every element naming the country, best first: interactive ones, then the smallest.
+  function destinationCandidates(country, exclude) {
+    const list = [];
+    for (const el of deepAll(PICK_SEL)) {
+      if (exclude.has(el) || travelOffLimits(el) || isNeverClick(el) || namesCountry(el) !== country) continue;
+      if (!visible(el) && el.tagName !== 'INPUT') continue;
+      const interactive = el.matches('button, [role="button"], [role="option"], [role="radio"], [role="menuitem"], input, a, label, li');
+      list.push({ el, score: (interactive ? 0 : 100000) + (el.textContent || '').length });
+    }
+    list.sort((a, z) => a.score - z.score);
+    return list.map((x) => x.el);
   }
   // What the travel page offers, for a bug report when nothing matched.
   function travelReport() {
@@ -1337,44 +1376,100 @@
     }
   };
   let selecting = false;
-  function selectDestination() {
-    if (selecting || !onTravelPage()) return;
+  function pendingDestination() {
+    // 1. The link: always the latest choice.
+    const m = location.hash.match(/[#&]fwdest=([^&]+)/);
+    if (m) {
+      const c = decodeURIComponent(m[1]);
+      try { history.replaceState(null, '', location.pathname + location.search); } catch (e) {}
+      return DESTS[c] ? c : null;
+    }
+    // 2. Storage backup, only if it was written in the last 20 seconds.
     const p = store.get('fw_travel', null);
-    if (!p || !DESTS[p.country] || now() - (p.ts || 0) > 180) return;
+    return p && DESTS[p.country] && now() - (p.ts || 0) <= 20 ? p.country : null;
+  }
+  function selectDestination(explicit) {
+    if (selecting || !onTravelPage()) return;
+    const target = explicit && DESTS[explicit] ? explicit : pendingDestination();
+    if (!target) return;
     selecting = true;
     const started = Date.now();
-    let openedAt = 0;
-    const done = (msg) => {
+    const log = [];
+    const tried = new Set();
+    let waitUntil = Date.now() + 600; // let the travel page render first
+    let attempts = 0;
+    let opened = false;
+    let lastPick = null;
+    let pending = false; // a tap is waiting to be checked
+    const finish = (ok, msg) => {
       clearInterval(timer);
       selecting = false;
       store.set('fw_travel', null);
       if (native) flushNow();
+      if (!ok) store.set('fw_travel_report', { at: now(), country: target, text: `${log.join('\n')}\n---\n${travelReport()}` });
       toast(msg);
     };
+    const okMsg = `${target} selected. Choose your ticket, then press Continue and Travel yourself.`;
+    const failMsg = `Couldn't switch the destination to ${target}. Pick it yourself, and if you can, send the travel report from Raw statuses.`;
     const timer = setInterval(() => {
-      const hit = findDestinationControl(p.country);
-      if (hit) {
-        const ctl = hit.el;
-        const open = ctl.getAttribute('aria-expanded') === 'true' || ctl.checked === true || ctl.getAttribute('aria-selected') === 'true';
-        if (!open) realClick(ctl);
-        try { (ctl.closest('label') || ctl).scrollIntoView({ block: 'center' }); } catch (e) {}
-        done(`${p.country} selected. Choose your ticket, then press Continue and Travel yourself.`);
+      if (Date.now() < waitUntil) return;
+      const shown = currentDestination();
+
+      // Check the last tap.
+      if (pending) {
+        pending = false;
+        log.push(`after tap, page shows: ${shown || '(no destination display)'}`);
+        if (shown === target) return finish(true, okMsg);
+        const marked = lastPick && (lastPick.checked === true || lastPick.getAttribute('aria-selected') === 'true' || lastPick.getAttribute('aria-expanded') === 'true');
+        if (!shown && marked) return finish(true, okMsg);
+        if (!shown) return finish(true, `Tapped ${target} on the travel page. Check it's selected, then choose your ticket and press Continue and Travel yourself.`);
+        opened = false; // the selector closed or didn't change: reopen and try the next entry
+      } else if (shown === target && attempts === 0) {
+        return finish(true, `${target} is already selected. Choose your ticket, then press Continue and Travel yourself.`);
+      }
+      if (attempts >= 5 || Date.now() - started > 15000) return finish(false, failMsg);
+
+      // Layouts that select directly: the destination list buttons and the map radios.
+      const direct = findDestinationControl(target);
+      if (direct && !tried.has(direct.el) && direct.el.matches('button[aria-controls^="travel-country-"], input[type="radio"]')) {
+        const el = direct.el;
+        tried.add(el);
+        attempts++;
+        lastPick = el;
+        log.push(`direct ${attempts}: ${describe(el)}`);
+        if (!(el.getAttribute('aria-expanded') === 'true' || el.checked)) realClick(el);
+        pending = true;
+        waitUntil = Date.now() + 900;
         return;
       }
-      // Nothing named this country yet: open the destination selector once, then keep looking.
-      if (!openedAt) {
-        const opener = findDestinationOpener(p.country);
-        if (opener) {
-          openedAt = Date.now();
-          realClick(opener);
-          return;
-        }
+
+      // Selector layout ("Torn -> Japan >"): open it first, then pick from the list it shows.
+      const opener = findDestinationOpener(target);
+      if (opener && !opened && opener.getAttribute('aria-expanded') !== 'true') {
+        log.push(`open: ${describe(opener)}`);
+        realClick(opener);
+        opened = true;
+        waitUntil = Date.now() + 700;
+        return;
       }
-      if (Date.now() - started > 15000) {
-        store.set('fw_travel_report', { at: now(), country: p.country, text: travelReport() });
-        done(`Couldn't find ${p.country} on the travel page. Pick it yourself, and if you can, send the travel report from Raw statuses.`);
-      }
-    }, 400);
+      if (!opener && !shown && Date.now() - started < 3000) return; // page may still be loading
+
+      const exclude = new Set(tried);
+      if (opener) exclude.add(opener);
+      const cands = destinationCandidates(target, exclude);
+      // Prefer entries of an open list (options, menu items, list rows) over anything else.
+      const inList = (el) => el.matches('[role="option"], [role="menuitem"]') || !!el.closest('[role="listbox"], [role="menu"], ul, ol');
+      const cand = cands.find(inList) || cands[0];
+      if (!cand) return;
+      tried.add(cand);
+      attempts++;
+      lastPick = cand;
+      log.push(`pick ${attempts}: ${describe(cand)}`);
+      const interactive = cand.matches('button, [role="button"], [role="option"], [role="menuitem"], [role="radio"], input, a, li, label');
+      realClick(interactive ? cand : cand.closest('button, [role="option"], [role="button"], li, label') || cand);
+      pending = true;
+      waitUntil = Date.now() + 900;
+    }, 300);
   }
 
   // ---------- Compose prefill ----------
