@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Flight Watch
 // @namespace    mcc.torn.ukwatch
-// @version      1.11.5
+// @version      1.11.6
 // @description  Watches the factions you're at war with, shows which countries are safe or risky, and alerts when enemies fly to, land in, or leave the country you're in or heading to.
 // @author       Ripcorder [4252513]
 // @match        https://www.torn.com/*
@@ -72,7 +72,7 @@
   const SERVER_KEY = 'sb_publishable_TZNmF4f4b2bWSC5zuUCqLQ_f5c3EYQf'; // publishable, safe to ship
   const SERVER_TOKEN = '6d975e385dde1a96370823b2';
 
-  const VERSION = '1.11.5'; // keep in step with @version so the panel shows what's actually running
+  const VERSION = '1.11.6'; // keep in step with @version so the panel shows what's actually running
   const TAB_ID = Math.random().toString(36).slice(2);
   const LEADER_TTL = 20;   // seconds before another tab takes over polling
   const WAR_CHECK = 300;   // seconds between war lookups in auto enemy mode
@@ -942,7 +942,7 @@
     h += `<div class="muted">FFScouter: ${!getCfg().showStats ? 'off' : ffError ? `<span class="err">${esc(ffError)}</span>` : `${Object.keys(ffCache()).length} estimate(s) cached`}</div>`;
     const tr = store.get('fw_travel_report', null);
     if (tr && tr.text) {
-      h += `<div class="muted">Travel page report (${esc(tr.country)}, ${fmt(t - tr.at)} ago) <a href="#" id="ukw-copyreport">Copy</a></div>`;
+      h += `<div class="muted">${tr.country === 'message' ? 'Message page' : 'Travel page'} report (${tr.country === 'message' ? '' : esc(tr.country) + ', '}${fmt(t - tr.at)} ago) <a href="#" id="ukw-copyreport">Copy</a></div>`;
     }
     h += `<div class="muted">Enemy data from: ${d.source === 'server' ? 'server (your key only checks your own status)' : 'Torn API directly'}</div>`;
     (d.factions || []).forEach((f) => (h += `<div class="muted">${esc(f.name)} [${esc(f.id)}]: ${f.count} ${f.away ? 'away from Torn' : 'members fetched'}</div>`));
@@ -1633,6 +1633,33 @@
     const root = composeRoot(subj);
     return root ? editorIn(root) : null; // no compose box yet: keep waiting, never search the page
   }
+  // What the compose page looked like, for a bug report when the fill-in didn't work.
+  function composeReport(outcome, p, subj, body, extra) {
+    const lines = [`Compose: ${outcome}`, `URL: ${location.pathname}${location.hash.replace(/fwmsg=[^&]+/, 'fwmsg=...')}`];
+    lines.push(`Warning: ${p ? `${now() - (p.ts || 0)}s old, from ${location.hash.includes('fwmsg=') ? 'link' : 'storage'}` : 'none found'}`);
+    lines.push(`Subject: ${subj ? describe(subj) : 'not found'}`);
+    const root = composeRoot(subj);
+    lines.push(`Compose box: ${root ? describe(root) : 'not found (no Send button near the subject)'}`);
+    lines.push(`Message box: ${body ? `${body.kind} ${describe(body.el)} text="${norm(body.kind === 'textarea' ? body.el.value : body.el.textContent).slice(0, 40)}"` : 'not found'}`);
+    if (extra) lines.push(extra);
+    const scope = root || document;
+    const sendBtns = [...scope.querySelectorAll('button, input[type="submit"], input[type="button"], a, [role="button"]')].filter((b) => /send/i.test(b.textContent || b.value || '')).slice(0, 5);
+    sendBtns.forEach((b) => lines.push(`send-ish: ${describe(b)}`));
+    const near = subj ? (() => { let n = subj; for (let i = 0; n && i < 6; i++) n = n.parentElement; return n || document; })() : document;
+    const edits = deepAll('iframe, textarea, [contenteditable], [role="textbox"], .ql-editor, .ProseMirror, [class*="editor" i]', near).slice(0, 15);
+    edits.forEach((el) => {
+      let info = '';
+      if (el.tagName === 'IFRAME') {
+        try {
+          const d = el.contentDocument;
+          info = d ? ` iframe-body contenteditable=${d.body && d.body.getAttribute('contenteditable')} designMode=${d.designMode}` : ' iframe (cross-origin)';
+        } catch (e) { info = ' iframe (blocked)'; }
+      }
+      lines.push(`${offArea(el) ? '[OFF] ' : ''}${visible(el) ? '' : '[hidden] '}${describe(el)} ce=${el.getAttribute('contenteditable')}${info}`);
+    });
+    store.set('fw_travel_report', { at: now(), country: 'message', text: lines.join('\n') });
+  }
+
   let prefillRunning = false;
   function prefillCompose() {
     if (prefillRunning || !/messages\.php/.test(location.pathname) || !/p=compose/.test(location.hash)) return;
@@ -1651,19 +1678,30 @@
         // Never overwrite something the user has already typed.
         if (!isEmpty(body)) {
           prefillRunning = false;
-          toast('The message box already has text, so Flight Watch left it alone. The warning is on your clipboard.');
+          composeReport('message box not empty', p, subj, body);
+          toast('The message box already has text, so Flight Watch left it alone. The warning is on your clipboard. (Report saved in Raw statuses.)');
           return;
         }
         if (body.kind === 'textarea') setFieldValue(body.el, p.body);
         else setEditable(body.el, p.body);
-        store.set('fw_pending', null);
-        if (native) flushNow();
-        prefillRunning = false;
-        toast('Warning written in. Check it, then press Send.');
+        // Check it actually went in: some editors ignore scripted input.
+        setTimeout(() => {
+          const got = norm(body.kind === 'textarea' ? body.el.value : body.el.textContent);
+          prefillRunning = false;
+          if (got.includes(norm(p.body).slice(0, 25))) {
+            store.set('fw_pending', null);
+            if (native) flushNow();
+            toast('Warning written in. Check it, then press Send.');
+          } else {
+            composeReport('wrote but text did not stick', p, subj, body);
+            toast("The message box didn't accept the text. The warning is on your clipboard: paste it in. (Report saved in Raw statuses.)");
+          }
+        }, 400);
       } else if (Date.now() - started > 15000) {
         clearInterval(timer);
         prefillRunning = false;
-        toast("Couldn't find the message box. The warning is on your clipboard: paste it in and send.");
+        composeReport('no message box found', p, subj, null);
+        toast("Couldn't find the message box. The warning is on your clipboard: paste it in and send. (Report saved in Raw statuses.)");
       }
     }, 300);
   }
