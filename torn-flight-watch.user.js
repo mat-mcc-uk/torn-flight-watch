@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Flight Watch
 // @namespace    mcc.torn.ukwatch
-// @version      1.11.4
+// @version      1.11.5
 // @description  Watches the factions you're at war with, shows which countries are safe or risky, and alerts when enemies fly to, land in, or leave the country you're in or heading to.
 // @author       Ripcorder [4252513]
 // @match        https://www.torn.com/*
@@ -72,7 +72,7 @@
   const SERVER_KEY = 'sb_publishable_TZNmF4f4b2bWSC5zuUCqLQ_f5c3EYQf'; // publishable, safe to ship
   const SERVER_TOKEN = '6d975e385dde1a96370823b2';
 
-  const VERSION = '1.11.4'; // keep in step with @version so the panel shows what's actually running
+  const VERSION = '1.11.5'; // keep in step with @version so the panel shows what's actually running
   const TAB_ID = Math.random().toString(36).slice(2);
   const LEADER_TTL = 20;   // seconds before another tab takes over polling
   const WAR_CHECK = 300;   // seconds between war lookups in auto enemy mode
@@ -1264,6 +1264,55 @@
   }
   const isNeverClick = (el) => /^(continue|travel|fly|book|confirm|yes)\b|travel to /.test(norm(el.textContent || el.value || el.getAttribute('aria-label') || ''));
 
+  // Torn's travel page, as reported from a real phone (page.php?sid=travel):
+  //   #travel-root .worldMap___ button.pin___...[aria-label="Hawaii"]        map pins
+  //   #travel-root .react-dropdown-default button.toggler .fromToValue___     current destination
+  //   #travel-root ul.scrollarea li#option-Hawaii-3.item                       dropdown rows
+  // Other scripts add their own country pickers to this page (e.g. select#tsi-country), so the
+  // search stays inside #travel-root when it exists.
+  const travelRoot = () => document.getElementById('travel-root');
+  const inTravelRoot = (el) => {
+    const r = travelRoot();
+    return !r || r.contains(el);
+  };
+  const isPin = (el) => /(^|\s)pin___/.test(typeof el.className === 'string' ? el.className : '');
+  function tornPin(country) {
+    const r = travelRoot();
+    if (!r) return null;
+    return [...r.querySelectorAll('button[class*="pin___"][aria-label]')].find((b) => namesCountryText(norm(b.getAttribute('aria-label'))) === country) || null;
+  }
+  function tornToggler() {
+    const r = travelRoot();
+    if (!r) return null;
+    // Two dropdowns exist (from and to); the "to" one shows a country.
+    return [...r.querySelectorAll('[class*="react-dropdown"] button.toggler, button.toggler')].find((b) => {
+      const v = b.querySelector('[class*="fromToValue"]');
+      return namesCountryText(norm(v ? v.textContent : b.textContent));
+    }) || null;
+  }
+  function tornCurrent() {
+    const t = tornToggler();
+    if (!t) return null;
+    const v = t.querySelector('[class*="fromToValue"]');
+    return namesCountryText(norm(v ? v.textContent : t.textContent));
+  }
+  function tornOption(country) {
+    const r = travelRoot();
+    if (!r) return null;
+    return [...r.querySelectorAll('li[id^="option-"], ul.scrollarea li')].find((li) => {
+      const v = li.querySelector('[class*="fromToValue"]');
+      return namesCountryText(norm(v ? v.textContent : li.textContent)) === country;
+    }) || null;
+  }
+  // Which single destination a piece of text names (exact names first, so "UAE" isn't confused).
+  function namesCountryText(txt) {
+    if (!txt) return null;
+    const exact = COUNTRIES.find((c) => destTerms(c).includes(txt));
+    if (exact) return exact;
+    const hits = COUNTRIES.filter((c) => destTerms(c).some((term) => txt.includes(term)));
+    return hits.length === 1 ? hits[0] : null;
+  }
+
   function findDestinationControl(country) {
     const terms = destTerms(country);
     const matches = (txt) => terms.some((term) => txt.includes(term));
@@ -1280,7 +1329,7 @@
     //    The smallest such element wins, so a whole row or panel isn't clicked by accident.
     let best = null;
     for (const el of deepAll(PICK_SEL)) {
-      if (travelOffLimits(el) || isNeverClick(el) || namesCountry(el) !== country) continue;
+      if (travelOffLimits(el) || !inTravelRoot(el) || el.tagName === 'OPTION' || isNeverClick(el) || namesCountry(el) !== country) continue;
       if (!visible(el) && el.tagName !== 'INPUT') continue;
       const size = (el.textContent || '').length;
       if (!best || size < best.size) best = { el, size };
@@ -1293,7 +1342,7 @@
   function openerCandidates() {
     const out = [];
     for (const el of deepAll(OPENER_SEL)) {
-      if (travelOffLimits(el) || isNeverClick(el) || !visible(el)) continue;
+      if (travelOffLimits(el) || isNeverClick(el) || !visible(el) || !inTravelRoot(el) || isPin(el)) continue;
       const c = namesCountry(el);
       if (!c) continue;
       const looksLikeOpener = el.matches('button, [role="button"], [role="combobox"], [aria-haspopup], [aria-expanded]') || el.querySelector('svg, i, [class*="arrow" i], [class*="chevron" i]');
@@ -1304,11 +1353,15 @@
     return out;
   }
   function findDestinationOpener(country) {
+    const t = tornToggler();
+    if (t) return tornCurrent() !== country ? t : null;
     const o = openerCandidates().find((x) => x.country !== country);
     return o ? o.el : null;
   }
   // The destination the page currently shows as selected, if it has such a display.
   function currentDestination() {
+    const t = tornCurrent();
+    if (t) return t;
     const o = openerCandidates()[0];
     return o ? o.country : null;
   }
@@ -1322,7 +1375,7 @@
   function destinationCandidates(country, exclude) {
     const list = [];
     for (const el of deepAll(PICK_SEL)) {
-      if (exclude.has(el) || travelOffLimits(el) || isNeverClick(el) || namesCountry(el) !== country) continue;
+      if (exclude.has(el) || travelOffLimits(el) || !inTravelRoot(el) || el.tagName === 'OPTION' || isNeverClick(el) || namesCountry(el) !== country) continue;
       if (!visible(el) && el.tagName !== 'INPUT') continue;
       const interactive = el.matches('button, [role="button"], [role="option"], [role="radio"], [role="menuitem"], input, a, label, li');
       list.push({ el, score: (interactive ? 0 : 100000) + (el.textContent || '').length });
@@ -1428,6 +1481,41 @@
         return finish(true, `${target} is already selected. Choose your ticket, then press Continue and Travel yourself.`);
       }
       if (attempts >= 5 || Date.now() - started > 15000) return finish(false, failMsg);
+
+      // Torn's page: tap the map pin; if that doesn't take, use the dropdown (open, then the row).
+      if (travelRoot()) {
+        const pin = tornPin(target);
+        if (pin && !tried.has(pin)) {
+          tried.add(pin);
+          attempts++;
+          lastPick = pin;
+          log.push(`pin ${attempts}: ${describe(pin)}`);
+          realClick(pin);
+          pending = true;
+          waitUntil = Date.now() + 900;
+          return;
+        }
+        const row = tornOption(target);
+        const tog = tornToggler();
+        if (tog && (!row || !visible(row)) && !opened) {
+          log.push(`open: ${describe(tog)}`);
+          realClick(tog);
+          opened = true;
+          waitUntil = Date.now() + 700;
+          return;
+        }
+        if (row && !tried.has(row)) {
+          tried.add(row);
+          attempts++;
+          lastPick = row;
+          log.push(`option ${attempts}: ${describe(row)}`);
+          realClick(row);
+          pending = true;
+          waitUntil = Date.now() + 900;
+          return;
+        }
+        if (Date.now() - started < 3000) return; // still rendering
+      }
 
       // Layouts that select directly: the destination list buttons and the map radios.
       const direct = findDestinationControl(target);
