@@ -1,0 +1,53 @@
+# Changelog
+
+## 1.11 (7 November 2026)
+
+**Tap a safe country to fly there.** The safe flags in the panel open Torn's travel agency with that destination selected. You pick the ticket and press Travel yourself.
+- 1.11.6: when the Warn fill-in fails, a Message page report is saved in Raw statuses. After writing, the script reads the message box back before saying it worked.
+- 1.11.5: uses the controls of Torn's real travel page: the map pins, then the destination dropdown if a pin doesn't take. It ignores other scripts' country pickers on the same page.
+- 1.11.4: fixed PDA always selecting the previously tapped country. The choice now travels in the link instead of slow storage. The script also reads the selector back and only says "selected" when it really is.
+- 1.11.2: fixed the whole travel page being ruled out as "sidebar". The script also searches shadow roots and frames, and the travel report gives more detail.
+- 1.11.1: handles the "Torn → destination" selector. Adds the travel page report.
+
+## 1.10 (6 November 2026)
+
+**Warnings name the enemies**, with landing times and FFScouter battle stat estimates. Estimates also show in the panel.
+- 1.10.1: the message fill-in only writes inside Torn's "Send a Message" box, and never over existing text. Earlier versions could write into the sidebar Notes box.
+
+## 1.9 (6 November 2026)
+
+**Warn writes the message for you.** The subject and warning are filled into Torn's message form, and you press Send.
+
+## 1.8 (6 November 2026)
+
+**New panel.** Flags for every country, risky countries as cards with counts and the next landing time, and safe countries folded into a row.
+**Faction mates at risk.** The server also tracks your own faction, and the panel lists mates in or flying to a risky country, with a Warn button.
+
+## 1.7 (6 November 2026)
+
+On PDA 3.15+, data is saved in PDA's native storage instead of the shared browser storage.
+
+## 1.6 (6 November 2026)
+
+When the server is up, the board and alerts are built from the server's data, and your key only checks your own status. This halves API use.
+- 1.6.5 / 1.6.4: copes with a full browser storage on torn.com: keeps working from memory, saves far less, and frees the old copy before retrying.
+- 1.6.3: a newer copy takes over polling from an older one, and the panel warns about duplicate installs.
+- 1.6.2: the panel shows the running version and a server data summary.
+- 1.6.1: PDA's Torn calls go through PDA's own request handler. The server allows 4 reads per IP every 10 seconds, so a PC and phone on one connection don't throttle each other.
+
+## 1.5 (6 November 2026)
+
+The server token is built in, so there's nothing to set up. Reads go through a rate-limited database function.
+- 1.5.3 / 1.5.1: server reads go through Tampermonkey's and PDA's own request functions, which aren't blocked by torn.com's page rules.
+- 1.5.2: takeoff times aren't guessed after a long gap, polls can't overlap, and every request has a 10-second timeout.
+- The rate limit uses the IP Cloudflare attaches to the request, which can't be faked.
+
+## 1.4 (6 November 2026)
+
+**24/7 server on Supabase.** It records enemy takeoff times even when nobody has Torn open, so every flight gets a landing countdown, marked `(srv)`.
+
+## 1.3 (6 November 2026)
+
+First release on GitHub. Safe/risky board for all 11 countries, auto-detection of the enemy faction from your faction's wars, alerts for the country you're in or flying to, and the Raw statuses view.
+- 1.3.2: reads Torn's "Traveling from X to Y" status wording.
+- 1.3.1: Torn PDA support.
