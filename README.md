@@ -10,6 +10,8 @@ A userscript for Torn City, for Tampermonkey in a browser or Torn PDA on a phone
 1. Install [Tampermonkey](https://www.tampermonkey.net/).
 2. Open the [raw script](https://raw.githubusercontent.com/mat-mcc-uk/torn-flight-watch/main/torn-flight-watch.user.js) and click **Install**.
 3. Load any torn.com page, tap the **Fly** button in the bottom-left corner, open **Settings** and paste in a Public API key.
+
+The button can be dragged anywhere on the screen, and it remembers where you put it on each device. A tap opens the panel next to it. **Settings > Put the button back in the corner** resets it.
 4. When Tampermonkey asks about a cross-site request, choose **Always allow domain**. The script talks to `supabase.co` (the faction server), `ffscouter.com` (battle stat estimates) and, if you add a webhook, `discord.com`.
 
 Tampermonkey checks for updates on its own schedule. To update straight away, use **Utilities > Check for userscript updates** in its dashboard.

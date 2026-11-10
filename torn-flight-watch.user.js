@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Flight Watch
 // @namespace    mcc.torn.ukwatch
-// @version      1.12.0
+// @version      1.13.0
 // @description  Watches the factions you're at war with, shows which countries are safe or risky, and alerts when enemies fly to, land in, or leave the country you're in or heading to.
 // @author       Ripcorder [4252513]
 // @match        https://www.torn.com/*
@@ -84,7 +84,7 @@
   const SERVER_KEY = 'sb_publishable_TZNmF4f4b2bWSC5zuUCqLQ_f5c3EYQf'; // publishable, safe to ship
   const SERVER_TOKEN = '6d975e385dde1a96370823b2';
 
-  const VERSION = '1.12.0'; // keep in step with @version so the panel shows what's actually running
+  const VERSION = '1.13.0'; // keep in step with @version so the panel shows what's actually running
   const TAB_ID = Math.random().toString(36).slice(2);
   const LEADER_TTL = 20;   // seconds before another tab takes over polling
   const WAR_CHECK = 300;   // seconds between war lookups in auto enemy mode
@@ -908,7 +908,8 @@
 
   // ---------- UI ----------
   const css = `
-    #ukw-btn{position:fixed;left:8px;bottom:70px;z-index:99999;background:#1d3b5c;color:#fff;border:1px solid #4a7fb5;border-radius:6px;padding:6px 9px;font:bold 12px Arial;cursor:pointer;display:flex;align-items:center;gap:5px}
+    #ukw-btn{position:fixed;left:8px;bottom:70px;z-index:99999;background:#1d3b5c;color:#fff;border:1px solid #4a7fb5;border-radius:6px;padding:6px 9px;font:bold 12px Arial;cursor:pointer;display:flex;align-items:center;gap:5px;touch-action:none;user-select:none;-webkit-user-select:none}
+    #ukw-btn.dragging{opacity:.85;box-shadow:0 0 0 2px #6fb3ff;cursor:grabbing}
     #ukw-btn.risky{background:#7a1f1f;border-color:#c0392b}
     #ukw-btn.safe{background:#1e5a2e;border-color:#2ecc71}
     #ukw-btn .n{background:#c0392b;border-radius:8px;padding:0 5px}
@@ -999,9 +1000,93 @@
   let tab = 'war';             // 'war' | 'mug'
   let mugFiltersOpen = false;  // while open, the panel isn't redrawn every second (so typing isn't lost)
   const expanded = new Set(); // countries opened in the board
-  btn.onclick = () => {
+  // ---------- Draggable button ----------
+  // Drag the button anywhere; the position is remembered per device (as a fraction of the screen,
+  // so it survives rotation and different window sizes). A tap still opens the panel.
+  const BTN_KEY = 'fw_btnpos';
+  const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+  function applyBtnPos() {
+    const pos = store.get(BTN_KEY, null);
+    if (!pos) {
+      btn.style.left = '8px';
+      btn.style.top = 'auto';
+      btn.style.bottom = '70px';
+      return;
+    }
+    const w = btn.offsetWidth || 60;
+    const h = btn.offsetHeight || 30;
+    btn.style.bottom = 'auto';
+    btn.style.left = `${clamp(Math.round(pos.x * window.innerWidth), 4, window.innerWidth - w - 4)}px`;
+    btn.style.top = `${clamp(Math.round(pos.y * window.innerHeight), 4, window.innerHeight - h - 4)}px`;
+  }
+  // Open the panel next to the button: above it when the button is in the lower half of the
+  // screen, below it otherwise, and kept on screen sideways.
+  function placePanel() {
+    const r = btn.getBoundingClientRect();
+    const pw = Math.min(340, window.innerWidth - 16);
+    panel.style.left = `${clamp(Math.round(r.left), 8, window.innerWidth - pw - 8)}px`;
+    if (r.top + r.height / 2 > window.innerHeight / 2) {
+      panel.style.top = 'auto';
+      panel.style.bottom = `${Math.max(8, Math.round(window.innerHeight - r.top + 6))}px`;
+      panel.style.maxHeight = `${Math.max(160, Math.round(r.top - 14))}px`;
+    } else {
+      panel.style.bottom = 'auto';
+      panel.style.top = `${Math.round(r.bottom + 6)}px`;
+      panel.style.maxHeight = `${Math.max(160, Math.round(window.innerHeight - r.bottom - 14))}px`;
+    }
+  }
+  let drag = null;       // { id, sx, sy, ox, oy, moved }
+  let suppressClick = false;
+  btn.addEventListener('pointerdown', (e) => {
+    if (e.button !== undefined && e.button !== 0) return;
+    const r = btn.getBoundingClientRect();
+    drag = { id: e.pointerId, sx: e.clientX, sy: e.clientY, ox: r.left, oy: r.top, moved: false };
+    try { btn.setPointerCapture(e.pointerId); } catch (err) {}
+  });
+  btn.addEventListener('pointermove', (e) => {
+    if (!drag || e.pointerId !== drag.id) return;
+    const dx = e.clientX - drag.sx;
+    const dy = e.clientY - drag.sy;
+    if (!drag.moved && Math.hypot(dx, dy) < 6) return; // small wobble is still a tap
+    drag.moved = true;
+    btn.classList.add('dragging');
+    btn.style.bottom = 'auto';
+    btn.style.left = `${clamp(drag.ox + dx, 4, window.innerWidth - btn.offsetWidth - 4)}px`;
+    btn.style.top = `${clamp(drag.oy + dy, 4, window.innerHeight - btn.offsetHeight - 4)}px`;
+    if (panel.style.display === 'block') placePanel();
+    e.preventDefault();
+  });
+  // A tap is handled on release rather than by 'click': with pointer capture on touch screens,
+  // some browsers never send the click. Any click that does follow is ignored.
+  function togglePanel() {
     panel.style.display = panel.style.display === 'block' ? 'none' : 'block';
+    if (panel.style.display === 'block') placePanel();
     render();
+  }
+  const endDrag = (e, cancelled) => {
+    if (!drag || (e && e.pointerId !== drag.id)) return;
+    if (drag.moved) {
+      const r = btn.getBoundingClientRect();
+      store.set(BTN_KEY, { x: r.left / window.innerWidth, y: r.top / window.innerHeight });
+      if (native) flushNow();
+    } else if (!cancelled) {
+      togglePanel();
+    }
+    suppressClick = true;
+    setTimeout(() => (suppressClick = false), 400);
+    btn.classList.remove('dragging');
+    drag = null;
+  };
+  btn.addEventListener('pointerup', (e) => endDrag(e, false));
+  btn.addEventListener('pointercancel', (e) => endDrag(e, true));
+  window.addEventListener('resize', () => {
+    applyBtnPos();
+    if (panel.style.display === 'block') placePanel();
+  });
+
+  btn.onclick = () => {
+    if (suppressClick) return; // already handled on release
+    togglePanel();
   };
 
   function renderSettings() {
@@ -1032,7 +1117,8 @@
       ${chk('alertLeave', 'Enemy leaves your country')}
       ${chk('showMates', 'Show faction mates in danger')}
       ${chk('showStats', 'Show FFScouter battle stat estimates')}
-      <button id="ukw-save">Save</button> <button id="ukw-test">Test alert</button></div>`;
+      <button id="ukw-save">Save</button> <button id="ukw-test">Test alert</button>
+      <div style="margin-top:6px"><a href="#" id="ukw-resetpos">Put the button back in the corner</a> <span class="muted">(drag it to move it)</span></div></div>`;
   }
 
   function memberRow(id, r, t, multi) {
@@ -1355,6 +1441,16 @@
           copyText(text).catch(() => {}).finally(go);
         };
       });
+    }
+    const rp = panel.querySelector('#ukw-resetpos');
+    if (rp) {
+      rp.onclick = (e) => {
+        e.preventDefault();
+        store.set(BTN_KEY, null);
+        if (native) flushNow();
+        applyBtnPos();
+        placePanel();
+      };
     }
     const save = panel.querySelector('#ukw-save');
     if (save) {
@@ -1949,6 +2045,7 @@
   }
 
   boot().then(() => {
+    applyBtnPos();
     prefillCompose();
     selectDestination();
     window.addEventListener('hashchange', prefillCompose);
