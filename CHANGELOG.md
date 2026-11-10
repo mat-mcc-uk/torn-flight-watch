@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.12 (10 November 2026)
+
+**Mug tab.** Shows active players flying to, or already in, a country you pick, from a server scan of Torn's player search. Each player has level, FFScouter estimate, online status, tags (no faction, bazaar, donator, bounty, director) and an Attack link. Filters cover level, max stats, online, no faction, bazaar and donator. The script checks the live status of the longest-flying inbound players and alerts the moment one lands.
+
 ## 1.11 (7 November 2026)
 
 **Tap a safe country to fly there.** The safe flags in the panel open Torn's travel agency with that destination selected. You pick the ticket and press Travel yourself.

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Flight Watch
 // @namespace    mcc.torn.ukwatch
-// @version      1.11.6
+// @version      1.12.0
 // @description  Watches the factions you're at war with, shows which countries are safe or risky, and alerts when enemies fly to, land in, or leave the country you're in or heading to.
 // @author       Ripcorder [4252513]
 // @match        https://www.torn.com/*
@@ -61,7 +61,19 @@
     alertArrive: true,         // summary of a country's risk when you start heading there
     showMates: true,
     ffKey: '',                 // FFScouter key for battle stat estimates; blank = use the Torn API key
-    showStats: true,           // list faction mates flying into danger, with a Warn button
+    showStats: true,
+    // Mug tab (traveller scan)
+    mugOn: false,
+    mugCountry: '',            // blank = the country you're in or flying to
+    mugLvlMin: 10,
+    mugLvlMax: 100,
+    mugMaxStats: '',           // e.g. "500m" or "2b"; blank = no limit (FFScouter estimate)
+    mugActive: false,          // online or idle at scan time
+    mugNoFaction: false,
+    mugBazaar: false,
+    mugDonator: false,
+    mugWatch: true,            // check inbound players and alert the moment they land
+    mugWatchCap: 10,           // how many inbound players to check each poll (1 API call each)           // list faction mates flying into danger, with a Warn button
     serverToken: '',           // leave blank to use the built-in token; paste a new one here after a rotation
   };
 
@@ -72,7 +84,7 @@
   const SERVER_KEY = 'sb_publishable_TZNmF4f4b2bWSC5zuUCqLQ_f5c3EYQf'; // publishable, safe to ship
   const SERVER_TOKEN = '6d975e385dde1a96370823b2';
 
-  const VERSION = '1.11.6'; // keep in step with @version so the panel shows what's actually running
+  const VERSION = '1.12.0'; // keep in step with @version so the panel shows what's actually running
   const TAB_ID = Math.random().toString(36).slice(2);
   const LEADER_TTL = 20;   // seconds before another tab takes over polling
   const WAR_CHECK = 300;   // seconds between war lookups in auto enemy mode
@@ -496,7 +508,7 @@
         }
         for (const r of json) {
           if (r && r.player_id != null) {
-            cache[String(r.player_id)] = { h: r.bs_estimate_human || null, ff: r.fair_fight != null ? r.fair_fight : null, at: t };
+            cache[String(r.player_id)] = { h: r.bs_estimate_human || null, est: r.bs_estimate != null ? Number(r.bs_estimate) : null, ff: r.fair_fight != null ? r.fair_fight : null, at: t };
           }
         }
       }
@@ -512,6 +524,91 @@
     const c = ffFor(id);
     return c && c.h ? `~${c.h}` : '';
   };
+
+  // ---------- Mug tab: traveller scan ----------
+  // The server pages through Torn's player search for active travellers (filters=traveling) every
+  // run and records who is flying to, or sitting in, each country, plus a few profile icons
+  // (bazaar open, donator/subscriber, bounty, company director). The search can't say when anyone
+  // took off, so there are no landing countdowns here; instead the script checks the live status of
+  // a capped number of inbound players and alerts the moment one lands.
+  const SCAN_URL = 'https://lwqcyivwyebhnqwubhuy.supabase.co/rest/v1/rpc/flight_watch_scan_read';
+  const MUG_FETCH_EVERY = 60;
+  let mugData = null;          // { country, at, players, meta }
+  let lastMugFetch = 0;
+  let mugError = '';
+  const mugSeen = {};          // id -> last live kind seen by the landing watch ('out' / 'there' / ...)
+  const mugLanded = {};        // id -> time we saw them land
+  const parseStats = (txt) => {
+    const m = String(txt || '').trim().toLowerCase().match(/^([\d.]+)\s*([kmbt])?$/);
+    if (!m) return null;
+    return Number(m[1]) * ({ k: 1e3, m: 1e6, b: 1e9, t: 1e12 }[m[2]] || 1);
+  };
+  const mugTarget = (cfg, meta) => cfg.mugCountry || (meta && meta.myDest) || '';
+  function mugPasses(p, cfg) {
+    if (p.level < (Number(cfg.mugLvlMin) || 0) || p.level > (Number(cfg.mugLvlMax) || 100)) return false;
+    if (cfg.mugActive && p.online !== 'Online' && p.online !== 'Idle') return false;
+    if (cfg.mugNoFaction && p.faction_id) return false;
+    if (cfg.mugBazaar && !p.bazaar) return false;
+    if (cfg.mugDonator && !p.donator) return false;
+    const max = parseStats(cfg.mugMaxStats);
+    if (max) {
+      const c = ffFor(p.id);
+      if (c && c.est != null && c.est > max) return false;
+    }
+    return true;
+  }
+  async function pollMug(cfg, t, meta) {
+    const country = mugTarget(cfg, meta);
+    if (!cfg.mugOn || !country) return;
+    if (!mugData || mugData.country !== country || t - lastMugFetch >= MUG_FETCH_EVERY) {
+      lastMugFetch = t;
+      try {
+        const { status, json: j } = await postJSON(SCAN_URL, { apikey: SERVER_KEY, 'Content-Type': 'application/json' }, { p_token: cfg.serverToken || SERVER_TOKEN, p_country: country });
+        if (status >= 200 && status < 300 && j && Array.isArray(j.players)) {
+          // Keep what the landing watch already learned about players we still list.
+          const old = mugData && mugData.country === country ? new Map(mugData.players.map((x) => [x.id, x])) : new Map();
+          j.players.forEach((x) => {
+            const o = old.get(x.id);
+            if (o && o.liveKind) Object.assign(x, { kind: o.kind, liveKind: o.liveKind, landedAt: o.landedAt });
+          });
+          mugData = { country, at: j.now || t, players: j.players, meta: j.meta || {} };
+          mugError = '';
+        } else if (!(j && j.throttled)) {
+          mugError = (j && (j.error || j.message)) || `HTTP ${status}`;
+        }
+      } catch (e) {
+        mugError = (e && e.message) || 'scan unreachable';
+      }
+    }
+    if (!mugData || mugData.country !== country) return;
+    const list = mugData.players.filter((p) => mugPasses(p, cfg));
+    refreshFF(cfg, list.slice(0, 150).map((p) => p.id));
+
+    // Landing watch: check the live status of inbound players, longest-flying first.
+    if (!cfg.mugWatch) return;
+    const cap = Math.max(1, Math.min(30, Number(cfg.mugWatchCap) || 10));
+    const inbound = list.filter((p) => p.kind === 'out').sort((a, z) => a.first_seen - z.first_seen).slice(0, cap);
+    await Promise.all(inbound.map(async (p) => {
+      try {
+        const b = await api(`user/${p.id}/basic?striptags=true`, cfg.apiKey);
+        const loc = parseLoc((b && b.profile && b.profile.status) || {});
+        const before = mugSeen[p.id];
+        mugSeen[p.id] = loc.kind;
+        p.liveKind = loc.kind;
+        if (loc.kind === 'there' && loc.country === country) {
+          p.kind = 'there';
+          p.landedAt = p.landedAt || t;
+          if (before === 'out' && !mugLanded[p.id]) {
+            mugLanded[p.id] = t;
+            const est = statsLabel(p.id);
+            alertOut(`Landed in ${DESTS[country].code}`, `${p.name} [${p.id}] lvl ${p.level}${est ? ` ${est}` : ''} just landed in ${country}`, `https://www.torn.com/loader.php?sid=attack&user2ID=${p.id}`);
+          }
+        } else if (loc.kind !== 'out' || loc.country !== country) {
+          p.kind = 'gone'; // turned back, landed elsewhere or the scan was stale
+        }
+      } catch (e) {}
+    }));
+  }
 
   // ---------- Poll ----------
   let lastPoll = 0;
@@ -762,6 +859,8 @@
       const friends = srv && !srv.error && !srv.throttled && Array.isArray(srv.friends) ? srv.friends : null;
       const myId = me && me.profile ? me.profile.id : null;
       setMeta(Object.assign(getMeta(), { myDest, myKind: mine.kind, myLoc, myRaw: `${myStatus.state || ''}: ${myStatus.description || ''}`, debug, server, friends, myId }));
+      // Mug tab, separately so a failure there can't affect the war board.
+      try { await pollMug(cfg, t, getMeta()); } catch (e) { mugError = (e && e.message) || 'mug scan failed'; }
     } catch (e) {
       lastError = e && e.message ? e.message : 'Network error';
     } finally {
@@ -851,6 +950,25 @@
     #ukw-panel .mate .info{flex:1;min-width:0}
     #ukw-panel .mate button{margin:0;background:#8a4b0f;border-color:#e67e22}
     #ukw-panel .ft{display:flex;justify-content:space-between;padding:8px 10px;border-top:1px solid #31353c}
+    #ukw-panel .tabs{display:flex;gap:4px;padding:6px 10px 0}
+    #ukw-panel .tabs a{flex:1;text-align:center;padding:5px 0;border-radius:6px 6px 0 0;background:#23262c;color:#9aa0a8;font-weight:bold}
+    #ukw-panel .tabs a.on{background:#2f3540;color:#fff}
+    #ukw-panel .cpick{display:flex;flex-wrap:wrap;gap:5px;margin:4px 0 6px}
+    #ukw-panel .cpick span{display:inline-flex;align-items:center;gap:3px;border:1px solid #3a3f47;border-radius:12px;padding:2px 6px;cursor:pointer;font-size:11px;color:#c9ccd1}
+    #ukw-panel .cpick span.on{border-color:#e67e22;background:#3a2a14;color:#fff}
+    #ukw-panel .mrow{display:flex;align-items:center;gap:6px;padding:5px 0;border-bottom:1px solid #2c3036}
+    #ukw-panel .mrow .info{flex:1;min-width:0}
+    #ukw-panel .mrow .atk{background:#7a1f1f;border:1px solid #c0392b;color:#fff;border-radius:4px;padding:3px 8px;font-size:11px;font-weight:bold}
+    #ukw-panel .dot{display:inline-block;width:7px;height:7px;border-radius:50%;margin-right:3px;background:#555}
+    #ukw-panel .dot.Online{background:#2ecc71}
+    #ukw-panel .dot.Idle{background:#f1c40f}
+    #ukw-panel .tag2{display:inline-block;font-size:10px;border-radius:8px;padding:0 5px;margin-left:3px;background:#33373e;color:#d7d9dd}
+    #ukw-panel .tag2.bz{background:#1e4a5c;color:#bde7ff}
+    #ukw-panel .tag2.dn{background:#4a3a12;color:#ffe3a0}
+    #ukw-panel .tag2.lnd{background:#7a1f1f;color:#fff}
+    #ukw-panel .filters{background:#202329;border:1px solid #31353c;border-radius:6px;padding:6px 8px;margin:4px 0 8px}
+    #ukw-panel .filters label{margin-right:8px;white-space:nowrap}
+    #ukw-panel .filters input[type=number],#ukw-panel .filters input[type=text]{width:60px;display:inline-block;margin:2px 4px 2px 0}
     #ukw-toast{position:fixed;left:50%;top:60px;transform:translateX(-50%);z-index:100000;background:#1d3b5c;color:#fff;padding:8px 12px;border-radius:6px;font:13px Arial;display:none;max-width:90vw}
   `;
   const style = document.createElement('style');
@@ -878,6 +996,8 @@
 
   let showSettings = false;
   let showDebug = false;
+  let tab = 'war';             // 'war' | 'mug'
+  let mugFiltersOpen = false;  // while open, the panel isn't redrawn every second (so typing isn't lost)
   const expanded = new Set(); // countries opened in the board
   btn.onclick = () => {
     panel.style.display = panel.style.display === 'block' ? 'none' : 'block';
@@ -1008,6 +1128,65 @@
     });
   }
 
+  function renderMug(meta, cfg, t) {
+    const country = mugTarget(cfg, meta);
+    let h = `<div class="sec">`;
+    h += `<label><input type="checkbox" data-m="mugOn" ${cfg.mugOn ? 'checked' : ''}> Scan travellers</label>`;
+    if (!cfg.mugOn) {
+      return h + `<div class="muted" style="margin-top:6px">Shows active players flying to, or sitting in, a country you pick, with filters and an alert the moment they land. The scan runs on the Flight Watch server.</div></div>`;
+    }
+    // Country picker: the country you're in/flying to, or a fixed one.
+    h += `<div class="cpick">${[['', 'Mine'], ...COUNTRIES.map((c) => [c, DESTS[c].code])].map(([c, label]) => {
+      const on = (cfg.mugCountry || '') === c;
+      return `<span class="${on ? 'on' : ''}" data-mc="${esc(c)}">${c ? flag(c, 14) : ''}${esc(label)}</span>`;
+    }).join('')}</div>`;
+    if (!country) return h + `<div class="muted">You're in Torn. Pick a country above, or fly somewhere and "Mine" follows you.</div></div>`;
+
+    const max = parseStats(cfg.mugMaxStats);
+    const active = [cfg.mugActive && 'active', cfg.mugNoFaction && 'no faction', cfg.mugBazaar && 'bazaar', cfg.mugDonator && 'donator', max && `stats ≤ ${esc(cfg.mugMaxStats)}`].filter(Boolean);
+    h += `<div><a href="#" id="ukw-mugf">${mugFiltersOpen ? 'Done' : 'Filters'}</a> <span class="muted">lvl ${esc(cfg.mugLvlMin)}-${esc(cfg.mugLvlMax)}${active.length ? ', ' + active.join(', ') : ''}</span></div>`;
+    if (mugFiltersOpen) {
+      const ck = (k, label) => `<label><input type="checkbox" data-m="${k}" ${cfg[k] ? 'checked' : ''}> ${label}</label>`;
+      h += `<div class="filters">
+        Level <input type="number" data-m="mugLvlMin" min="1" max="100" value="${esc(cfg.mugLvlMin)}">to <input type="number" data-m="mugLvlMax" min="1" max="100" value="${esc(cfg.mugLvlMax)}"><br>
+        Max stats (FFScouter) <input type="text" data-m="mugMaxStats" placeholder="e.g. 500m" value="${esc(cfg.mugMaxStats)}"><br>
+        ${ck('mugActive', 'Online/idle')} ${ck('mugNoFaction', 'No faction')} ${ck('mugBazaar', 'Bazaar open')} ${ck('mugDonator', 'Donator')}<br>
+        ${ck('mugWatch', 'Alert when they land')} checking up to <input type="number" data-m="mugWatchCap" min="1" max="30" value="${esc(cfg.mugWatchCap)}">players
+        <div class="muted">Each player checked costs one call from your API key per poll.</div>
+      </div>`;
+    }
+    if (mugError) h += `<div class="err">${esc(mugError)}</div>`;
+    if (!mugData || mugData.country !== country) return h + `<div class="muted">Loading ${esc(country)}…</div></div>`;
+
+    const list = mugData.players.filter((p) => p.kind !== 'gone' && mugPasses(p, cfg));
+    const inbound = list.filter((p) => p.kind === 'out').sort((a, z) => a.first_seen - z.first_seen);
+    const there = list.filter((p) => p.kind === 'there').sort((a, z) => (z.landedAt || 0) - (a.landedAt || 0) || a.first_seen - z.first_seen);
+    const cap = Math.max(1, Math.min(30, Number(cfg.mugWatchCap) || 10));
+    const watched = new Set(cfg.mugWatch ? inbound.slice(0, cap).map((p) => p.id) : []);
+    const row = (p) => {
+      const est = statsLabel(p.id);
+      const tags = [
+        !p.faction_id && '<span class="tag2">no faction</span>',
+        p.bazaar && '<span class="tag2 bz">bazaar</span>',
+        p.donator && '<span class="tag2 dn">donator</span>',
+        p.bounty && '<span class="tag2">bounty</span>',
+        p.director && '<span class="tag2">director</span>',
+        p.landedAt && t - p.landedAt < 900 && `<span class="tag2 lnd">landed ${fmt(t - p.landedAt)} ago</span>`,
+      ].filter(Boolean).join('');
+      const when = p.kind === 'out'
+        ? `flying, seen ${fmt(t - p.first_seen)} ago${watched.has(p.id) ? ' · watching' : ''}`
+        : `there, seen ${fmt(t - p.first_seen)} ago`;
+      return `<div class="mrow"><div class="info"><span class="dot ${esc(p.online || '')}"></span><a href="https://www.torn.com/profiles.php?XID=${p.id}">${esc(p.name)}</a> <span class="muted">${p.level}${est ? ` · ${esc(est)}` : ''}</span>${tags}<br><span class="muted">${when}</span></div><a class="atk" href="https://www.torn.com/loader.php?sid=attack&user2ID=${p.id}">Attack</a></div>`;
+    };
+    const age = mugData.meta && mugData.meta.last_pass ? ` · full scan ${fmt(t - mugData.meta.last_pass)} ago` : '';
+    h += `<h4>${flag(country)} Flying to ${esc(country)} (${inbound.length})</h4>`;
+    h += inbound.length ? inbound.slice(0, 60).map(row).join('') : `<div class="muted">Nobody matching your filters.</div>`;
+    h += `<h4>In ${esc(country)} now (${there.length})</h4>`;
+    h += there.length ? there.slice(0, 60).map(row).join('') : `<div class="muted">Nobody matching your filters.</div>`;
+    h += `<div class="muted" style="margin-top:6px">From the server's scan of active travellers${age}. Search results can lag a little; "watching" players are checked live.</div>`;
+    return h + `</div>`;
+  }
+
   function render() {
     if (panel.style.display !== 'block') return;
     const state = getState();
@@ -1029,6 +1208,9 @@
     }
     if (meta.myLoc) html += `<br>${meta.myDest ? `${flag(meta.myDest, 14)} ` : ''}${esc(meta.myLoc)}`;
     html += `</div>`;
+    if (!showSettings && !showDebug) {
+      html += `<div class="tabs"><a href="#" data-tab="war" class="${tab === 'war' ? 'on' : ''}">War</a><a href="#" data-tab="mug" class="${tab === 'mug' ? 'on' : ''}">Mug</a></div>`;
+    }
     if (dupeOnPage) html += `<div class="sec err">Flight Watch is installed more than once. Remove the extra copies (in PDA: Settings > Userscripts) and keep only the one from GitHub.</div>`;
     if (!cfg.apiKey) html += `<div class="sec err">Add an API key in Settings.</div>`;
     else if (cfg.enemyMode === 'manual' && !cfg.factionId) html += `<div class="sec err">Add a faction ID in Settings, or switch Enemy to auto.</div>`;
@@ -1038,6 +1220,8 @@
       html += renderSettings();
     } else if (showDebug) {
       html += renderDebug(state, meta, t);
+    } else if (tab === 'mug') {
+      html += renderMug(meta, cfg, t);
     } else {
       const board = countryBoard(state, t);
       // Risky countries first: yours on top, then soonest enemy landing / most enemies.
@@ -1109,6 +1293,38 @@
       showSettings = !showSettings;
       render();
     };
+    panel.querySelectorAll('[data-tab]').forEach((el) => {
+      el.onclick = (e) => {
+        e.preventDefault();
+        tab = el.dataset.tab;
+        mugFiltersOpen = false;
+        render();
+      };
+    });
+    panel.querySelectorAll('[data-mc]').forEach((el) => {
+      el.onclick = () => {
+        const c = getCfg();
+        c.mugCountry = el.dataset.mc;
+        setCfg(c);
+        lastMugFetch = 0;
+        lastPoll = 0; // fetch the new country on the next tick
+        render();
+      };
+    });
+    const mf = panel.querySelector('#ukw-mugf');
+    if (mf) mf.onclick = (e) => { e.preventDefault(); mugFiltersOpen = !mugFiltersOpen; render(); };
+    panel.querySelectorAll('[data-m]').forEach((el) => {
+      el.onchange = () => {
+        const c = getCfg();
+        const k = el.dataset.m;
+        if (el.type === 'checkbox') c[k] = el.checked;
+        else if (el.type === 'number') c[k] = Math.max(Number(el.min) || 0, Math.min(Number(el.max) || 1e9, Number(el.value) || DEFAULTS[k]));
+        else c[k] = el.value.trim();
+        setCfg(c);
+        if (k === 'mugOn') { lastMugFetch = 0; lastPoll = 0; }
+        if (el.type === 'checkbox') render();
+      };
+    });
     panel.querySelectorAll('[data-c]').forEach((el) => {
       el.onclick = (e) => {
         if (e.target.closest('a')) return;
@@ -1739,7 +1955,7 @@
     setInterval(() => {
       if (amLeader()) poll();
       updateBadge();
-      if (!showSettings) render();
+      if (!showSettings && !mugFiltersOpen) render();
     }, 1000);
     updateBadge();
   });

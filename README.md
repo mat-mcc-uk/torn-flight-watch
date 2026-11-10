@@ -1,6 +1,6 @@
 # Torn Flight Watch
 
-A userscript for Torn City, for Tampermonkey in a browser or Torn PDA on a phone. It tracks the factions you're at war with and shows which countries are safe or risky. It warns you when enemies fly to, land in, or leave the country you're in or heading to. It also lists faction mates flying into danger, with a Warn button that writes the message for you.
+A userscript for Torn City, for Tampermonkey in a browser or Torn PDA on a phone. It tracks the factions you're at war with and shows which countries are safe or risky. It warns you when enemies fly to, land in, or leave the country you're in or heading to. It also lists faction mates flying into danger, with a Warn button that writes the message for you. A Mug tab shows active players flying to or sitting in a country you pick, and alerts you the moment one lands.
 
 ![Flight Watch panel](docs/panel.png)
 
@@ -47,6 +47,17 @@ On PDA 3.15 or later the script saves its data in PDA's native storage (the gree
 - Come from [FFScouter](https://ffscouter.com/). Your Torn key is used by default. It must be registered at ffscouter.com, which it will be if FFScouter already works for you. If you use a different key for FFScouter, put it in **FFScouter key** in Settings.
 - Only enemies away from Torn are looked up. Each estimate is kept for 6 hours.
 
+**Mug tab** (traveller scan)
+
+![Mug tab](docs/mug.png)
+
+- Tick **Scan travellers**, then pick a country, or **Mine** to follow the country you're in or flying to.
+- **Flying to** lists active players on their way there. **In … now** lists those already there. Each row has level, FFScouter estimate, an online dot, tags (no faction, bazaar, donator, bounty, company director) and an **Attack** link.
+- **Filters:** level range, max stats (FFScouter estimate, such as `500m` or `2b`), online or idle only, no faction only, bazaar open, donator.
+- **Landing alert:** the script checks the live status of the inbound players who've been flying longest (10 by default, up to 30) every poll, and alerts the moment one lands, with the Attack link. Each player checked costs one call from your key per poll, so keep the number modest. Torn allows 100 calls a minute per account across all your keys and scripts.
+- **Where the data comes from:** the server pages through Torn's player search for active travellers (`filters=traveling,lastActionNow,level:>=:10`), 6 pages every 30 seconds, covering the whole list about every 15 minutes. Each result's travel icon names the destination. The search can't say when someone took off, so there are no landing countdowns here; the live landing check does that job.
+- **What isn't available:** Torn's API doesn't show other players' market trades or casino play. The bazaar icon is the only market signal.
+
 **Alerts** (only for the country you're in or flying to)
 - Safe/risky summary when you take off somewhere
 - Enemy takes off for your country, with plane type and estimated landing time
@@ -71,6 +82,7 @@ Alerts show as browser notifications and an on-page toast, and can also post to 
 | Alert switches | Turn each alert on or off. |
 | Show faction mates in danger | The danger list and Warn buttons. |
 | Show FFScouter battle stat estimates | Estimates in the panel and in warnings. |
+| Mug tab | Scan on/off, country, filters, landing alert and how many players it checks. Set inside the tab. |
 
 ## How landing times are worked out
 
@@ -94,6 +106,7 @@ The server runs on Supabase. It polls your faction and the enemy factions every 
 
 - `supabase/functions/flight-watch-poll` is called by `pg_cron` every 30 seconds. It works out who the faction is at war with (rechecked every 5 minutes) and fetches the enemy members and your own faction's members. It stores each player's location and estimated takeoff time, with your own faction marked `side = 'friend'`.
 - `flight_watch_read` is a database function, called through Supabase's REST API. It returns enemies away from Torn as `members` and faction mates away as `friends`. It checks the read token and allows up to 4 fresh reads per IP every 10 seconds, using the IP Cloudflare attaches to the request, which clients can't fake. Reads this way don't count against the edge function quota.
+- The same function also runs the traveller scan for the Mug tab, after the war tracking so a scan error can't affect it. Results go to `flight_watch_scan`, and players not seen for 45 minutes are dropped. `flight_watch_scan_read` returns one country's travellers, with the same rate limit.
 - `supabase/functions/flight-watch-read` is retired. It's kept only to tell very old script versions to update.
 - `supabase/migrations` holds the tables, the read function and the cron job.
 
@@ -103,7 +116,7 @@ The server uses one Public Torn API key, stored as the `TORN_API_KEY` edge funct
 
 ## API usage
 
-Everything works with a Public key. When the server's data is less than 2 minutes old, the script reads player positions from the server, and your key is only used to check your own status: one call per poll. If the server is down or behind, or you're in fixed-faction mode, the script fetches the enemy factions itself instead (one call per faction per poll, plus the war lookup every 5 minutes). FFScouter lookups are batched and cached.
+Everything works with a Public key. The server's own key makes about 4 calls a minute for the war data and 12 for the traveller scan. When the server's data is less than 2 minutes old, the script reads player positions from the server, and your key is only used to check your own status: one call per poll. If the server is down or behind, or you're in fixed-faction mode, the script fetches the enemy factions itself instead (one call per faction per poll, plus the war lookup every 5 minutes). FFScouter lookups are batched and cached.
 
 Only one Torn tab polls at a time, so several open tabs don't double up the calls or the alerts. A newer copy of the script takes over polling from an older one straight away.
 

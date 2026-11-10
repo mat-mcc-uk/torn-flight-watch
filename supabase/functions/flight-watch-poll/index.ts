@@ -26,6 +26,96 @@ const PLANE_INDEX: Record<string, number> = { airliner: 0, light_aircraft: 1, pr
 const WAR_CHECK = 300;
 const MAX_GAP = 90; // seconds, three 30-second runs
 
+// Traveller scan (mugging): page through /user/search?filters=traveling a few pages per run,
+// continuing from the last run's cursor, so the whole list is covered every ~15 minutes.
+const SCAN_FILTERS = "traveling,lastActionNow,level:>=:10";
+const SCAN_PAGES_PER_RUN = 6;     // 25 players per page; 12 API calls a minute at a 30 s cron
+const SCAN_EXPIRE = 45 * 60;      // drop players not seen for 45 minutes
+
+// The travel icon (id 71) names the trip: "Traveling from Torn to Japan", "Traveling from Japan to
+// Torn", or "Hiding out in Japan" / "In Japan" when they're already there.
+function parseTravelIcon(title: string): { kind: "out" | "there" | "back"; country: string } | null {
+  const t = title.toLowerCase();
+  const ft = t.match(/from\s+(.+?)\s+to\s+(.+?)\s*$/);
+  if (ft) {
+    const [, from, to] = ft;
+    if (/\btorn\b/.test(to)) {
+      const c = findCountry(from);
+      return c ? { kind: "back", country: c } : null;
+    }
+    const c = findCountry(to);
+    return c ? { kind: "out", country: c } : null;
+  }
+  const c = findCountry(t);
+  return c ? { kind: "there", country: c } : null;
+}
+
+async function scanTravellers(db: any, key: string, t: number) {
+  const { data: meta } = await db.from("flight_watch_meta").select("scan_cursor, scan_pass_started").eq("id", 1).single();
+  let url: string | null = meta?.scan_cursor || null;
+  let passStarted = meta?.scan_pass_started || t;
+  if (!url) {
+    url = `https://api.torn.com/v2/user/search?filters=${SCAN_FILTERS}`;
+    passStarted = t;
+  }
+  const rows: any[] = [];
+  const backIds: number[] = [];
+  let finished = false;
+  for (let i = 0; i < SCAN_PAGES_PER_RUN && url; i++) {
+    const r = await fetch(`${url}${url.includes("?") ? "&" : "?"}key=${encodeURIComponent(key)}`, { signal: AbortSignal.timeout(10000) });
+    const j = await r.json();
+    if (j?.error) throw new Error(`scan: Torn API ${j.error.code}: ${j.error.error}`);
+    for (const u of j?.search ?? []) {
+      const icons = u.icons ?? [];
+      const trip = icons.find((ic: any) => ic.id === 71);
+      const loc = trip ? parseTravelIcon(String(trip.title ?? "")) : null;
+      if (!loc) continue;
+      if (loc.kind === "back") {
+        backIds.push(u.id);
+        continue;
+      }
+      const has = (id: number) => icons.some((ic: any) => ic.id === id);
+      rows.push({
+        player_id: u.id,
+        name: u.name,
+        level: u.level,
+        faction_id: u.faction_id || null,
+        online: u.online ?? null,
+        kind: loc.kind,
+        country: loc.country,
+        bazaar: has(35),
+        donator: has(3) || has(4),
+        bounty: has(13),
+        director: has(73),
+        seen_at: t,
+      });
+    }
+    url = j?._metadata?.links?.next ?? null;
+    if (!url) finished = true;
+  }
+  if (rows.length) {
+    // Keep first_seen while a player stays on the same trip or in the same country.
+    const { data: prev } = await db.from("flight_watch_scan").select("player_id, kind, country, first_seen").in("player_id", rows.map((r) => r.player_id));
+    const prevById = new Map<number, any>((prev ?? []).map((p: any) => [Number(p.player_id), p]));
+    for (const r of rows) {
+      const p = prevById.get(Number(r.player_id));
+      r.first_seen = p && p.kind === r.kind && p.country === r.country ? p.first_seen : t;
+    }
+    const { error } = await db.from("flight_watch_scan").upsert(rows, { onConflict: "player_id" });
+    if (error) throw new Error(`scan upsert: ${error.message}`);
+  }
+  if (backIds.length) await db.from("flight_watch_scan").delete().in("player_id", backIds);
+  await db.from("flight_watch_scan").delete().lt("seen_at", t - SCAN_EXPIRE);
+  const update: any = { scan_cursor: finished ? null : url, scan_pass_started: passStarted, scan_error: null };
+  if (finished) {
+    const { count } = await db.from("flight_watch_scan").select("player_id", { count: "exact", head: true });
+    update.scan_last_pass = t;
+    update.scan_total = count ?? 0;
+  }
+  await db.from("flight_watch_meta").update(update).eq("id", 1);
+  return rows.length;
+}
+
 const namesFor = (c: string) => NAMES[c] ?? [c.toLowerCase()];
 const findCountry = (s: string) => COUNTRIES.find((c) => namesFor(c).some((n) => s.includes(n))) ?? null;
 
@@ -182,7 +272,17 @@ Deno.serve(async (req) => {
     if (gone.length) await db.from("flight_watch_members").delete().in("player_id", gone);
 
     await db.from("flight_watch_meta").update({ last_poll: t, last_error: null }).eq("id", 1);
-    return new Response(JSON.stringify({ ok: true, enemies: enemies.length, rows: rows.length }), {
+
+    // Traveller scan runs after the war tracking and can't break it.
+    let scanned = 0;
+    let scanError: string | null = null;
+    try {
+      scanned = await scanTravellers(db, key, t);
+    } catch (e) {
+      scanError = String((e as Error).message ?? e);
+      await db.from("flight_watch_meta").update({ scan_error: scanError }).eq("id", 1);
+    }
+    return new Response(JSON.stringify({ ok: true, enemies: enemies.length, rows: rows.length, scanned, scanError }), {
       headers: { "Content-Type": "application/json" },
     });
   } catch (e) {
