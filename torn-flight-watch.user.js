@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Flight Watch
 // @namespace    mcc.torn.ukwatch
-// @version      1.13.1
+// @version      1.14.0
 // @description  Watches the factions you're at war with, shows which countries are safe or risky, and alerts when enemies fly to, land in, or leave the country you're in or heading to.
 // @author       Ripcorder [4252513]
 // @match        https://www.torn.com/*
@@ -72,6 +72,7 @@
     mugNoFaction: false,
     mugBazaar: false,
     mugDonator: false,
+    mugHideHosp: false,
     mugWatch: true,            // check inbound players and alert the moment they land
     mugWatchCap: 10,           // how many inbound players to check each poll (1 API call each)           // list faction mates flying into danger, with a Warn button
     serverToken: '',           // leave blank to use the built-in token; paste a new one here after a rotation
@@ -84,7 +85,7 @@
   const SERVER_KEY = 'sb_publishable_TZNmF4f4b2bWSC5zuUCqLQ_f5c3EYQf'; // publishable, safe to ship
   const SERVER_TOKEN = '6d975e385dde1a96370823b2';
 
-  const VERSION = '1.13.1'; // keep in step with @version so the panel shows what's actually running
+  const VERSION = '1.14.0'; // keep in step with @version so the panel shows what's actually running
   const TAB_ID = Math.random().toString(36).slice(2);
   const LEADER_TTL = 20;   // seconds before another tab takes over polling
   const WAR_CHECK = 300;   // seconds between war lookups in auto enemy mode
@@ -254,6 +255,33 @@
   }
 
   // Count enemies per country from the stored state.
+  // Why someone is in hospital, from Torn's status.details or the search hospital icon.
+  // Self-inflicted: "Severe emesis following Ipecac Syrup ingestion" and "Suffering from an acute
+  // hemolytic transfusion reaction" (wrong blood bag). Otherwise "Mugged by X", "Attacked by X", "Lost to X".
+  function hospCause(text) {
+    const s = String(text || '').replace(/<[^>]*>/g, '').replace(/\s+/g, ' ').trim();
+    if (!s) return null;
+    if (/ipecac/i.test(s)) return { cause: 'ipecac', by: null };
+    if (/transfusion|hemolytic|haemolytic/i.test(s)) return { cause: 'blood', by: null };
+    const m = s.match(/^(mugged by|attacked by|hospitali[sz]ed by|lost to)\s*(.*)$/i);
+    if (m) {
+      const verb = m[1].toLowerCase();
+      const cause = verb.startsWith('mugged') ? 'mugged' : verb.startsWith('lost') ? 'lost' : 'attacked';
+      return { cause, by: m[2] && !/^someone$/i.test(m[2]) ? m[2].slice(0, 40) : null };
+    }
+    return { cause: 'other', by: s.slice(0, 80) };
+  }
+  const SELF_HOSP = { ipecac: 'Ipecac', blood: 'blood bag' };
+  // Short label: "self-hosp (Ipecac)", "mugged by X", "hospitalised by someone", "lost to X".
+  function hospLabel(cause, by) {
+    if (!cause) return '';
+    if (SELF_HOSP[cause]) return `self-hosp (${SELF_HOSP[cause]})`;
+    if (cause === 'mugged') return `mugged by ${by || 'someone'}`;
+    if (cause === 'lost') return `lost to ${by || 'someone'}`;
+    if (cause === 'attacked') return `hospitalised by ${by || 'someone'}`;
+    return by || '';
+  }
+
   function countryBoard(state, t) {
     const board = {};
     for (const c of COUNTRIES) board[c] = { there: [], hosp: [], inbound: [] };
@@ -550,6 +578,7 @@
     if (cfg.mugNoFaction && p.faction_id) return false;
     if (cfg.mugBazaar && !p.bazaar) return false;
     if (cfg.mugDonator && !p.donator) return false;
+    if (cfg.mugHideHosp && p.hosp_cause) return false;
     const max = parseStats(cfg.mugMaxStats);
     if (max) {
       const c = ffFor(p.id);
@@ -591,7 +620,11 @@
     await Promise.all(inbound.map(async (p) => {
       try {
         const b = await api(`user/${p.id}/basic?striptags=true`, cfg.apiKey);
-        const loc = parseLoc((b && b.profile && b.profile.status) || {});
+        const st = (b && b.profile && b.profile.status) || {};
+        const loc = parseLoc(st);
+        const hc = loc.hosp ? hospCause(st.details) : null;
+        p.hosp_cause = hc ? hc.cause : null;
+        p.hosp_by = hc ? hc.by : null;
         const before = mugSeen[p.id];
         mugSeen[p.id] = loc.kind;
         p.liveKind = loc.kind;
@@ -690,6 +723,8 @@
             loc: { kind: r.kind, country: r.country, hosp: !!r.hosp },
             plane: r.plane || null,
             until: r.hosp ? r.hosp_until : null,
+            hospCause: r.hosp ? r.hosp_cause || null : null,
+            hospBy: r.hosp ? r.hosp_by || null : null,
             rawState: r.kind === 'there' ? (r.hosp ? 'Hospital' : 'Abroad') : 'Traveling',
             rawDesc: `${r.kind} ${r.country || ''} (from server)`,
             srvDepart: r.kind === 'out' ? r.depart_at || null : null,
@@ -721,6 +756,7 @@
             const st = m.status || {};
             const loc = parseLoc(st);
             const sv = srvDepart.get(String(m.id));
+            const hc = loc.hosp ? hospCause(st.details) : null;
             obs.push({
               id: String(m.id),
               name: m.name,
@@ -729,6 +765,8 @@
               loc,
               plane: st.plane_image_type || null,
               until: st.until || null,
+              hospCause: hc ? hc.cause : null,
+              hospBy: hc ? hc.by : null,
               rawState: st.state || '',
               rawDesc: st.description || '',
               srvDepart: sv && sv.country === loc.country && loc.kind === 'out' ? sv.depart_at : null,
@@ -779,6 +817,8 @@
         rec.country = loc.country;
         rec.hosp = !!loc.hosp;
         rec.hospUntil = loc.hosp ? o.until || null : null;
+        rec.hospCause = loc.hosp ? o.hospCause || null : null;
+        rec.hospBy = loc.hosp ? o.hospBy || null : null;
         rec.rawState = o.rawState;
         rec.rawDesc = o.rawDesc;
 
@@ -967,6 +1007,8 @@
     #ukw-panel .tag2.bz{background:#1e4a5c;color:#bde7ff}
     #ukw-panel .tag2.dn{background:#4a3a12;color:#ffe3a0}
     #ukw-panel .tag2.lnd{background:#7a1f1f;color:#fff}
+    #ukw-panel .tag2.self{background:#3d3550;color:#d9ccff;margin-left:0}
+    #ukw-panel .tag2.hit{background:#4a2b2b;color:#ffc9c9;margin-left:0}
     #ukw-panel .filters{background:#202329;border:1px solid #31353c;border-radius:6px;padding:6px 8px;margin:4px 0 8px}
     #ukw-panel .filters label{margin-right:8px;white-space:nowrap}
     #ukw-panel .filters input[type=number],#ukw-panel .filters input[type=text]{width:60px;display:inline-block;margin:2px 4px 2px 0}
@@ -1141,7 +1183,10 @@
       return `<tr><td>${link}<br><span class="muted">${planeLabel(r.plane)}</span></td><td style="text-align:right">${eta}${biz}</td></tr>`;
     }
     const note = r.hosp ? `in hosp${r.hospUntil && r.hospUntil > t ? ` ${fmt(r.hospUntil - t)}` : ''}` : 'landed';
-    return `<tr><td>${link}</td><td style="text-align:right" class="muted">${note}</td></tr>`;
+    const why = r.hosp && r.hospCause
+      ? `<br><span class="tag2 ${SELF_HOSP[r.hospCause] ? 'self' : 'hit'}">${esc(hospLabel(r.hospCause, r.hospBy))}</span>`
+      : '';
+    return `<tr><td>${link}${why}</td><td style="text-align:right" class="muted">${note}</td></tr>`;
   }
 
   // Shows exactly what the API returned for each enemy and how the script read it.
@@ -1199,7 +1244,7 @@
     const lines = [];
     const there = [...b.there, ...b.hosp];
     if (there.length) {
-      lines.push(`In ${f.country} now: ${there.slice(0, 6).map(([id, r]) => `${who([id, r])}${r.hosp ? ' in hospital' : ''}`).join(', ')}${there.length > 6 ? ` and ${there.length - 6} more` : ''}.`);
+      lines.push(`In ${f.country} now: ${there.slice(0, 6).map(([id, r]) => `${who([id, r])}${r.hosp ? (SELF_HOSP[r.hospCause] ? ' (self-hospitalised)' : ' in hospital') : ''}`).join(', ')}${there.length > 6 ? ` and ${there.length - 6} more` : ''}.`);
     }
     if (b.inbound.length) {
       lines.push(`On the way: ${b.inbound.slice(0, 6).map(([id, r]) => `${who([id, r])}${r.eta ? `, lands in about ${fmt(r.eta - t)}` : ''}`).join('; ')}${b.inbound.length > 6 ? `; and ${b.inbound.length - 6} more` : ''}.`);
@@ -1240,14 +1285,14 @@
     if (!country) return h + `<div class="muted">You're in Torn. Pick a country above, or fly somewhere and "Mine" follows you.</div></div>`;
 
     const max = parseStats(cfg.mugMaxStats);
-    const active = [cfg.mugActive && 'active', cfg.mugNoFaction && 'no faction', cfg.mugBazaar && 'bazaar', cfg.mugDonator && 'donator', max && `stats ≤ ${esc(cfg.mugMaxStats)}`].filter(Boolean);
+    const active = [cfg.mugActive && 'active', cfg.mugNoFaction && 'no faction', cfg.mugBazaar && 'bazaar', cfg.mugDonator && 'donator', cfg.mugHideHosp && 'not in hosp', max && `stats ≤ ${esc(cfg.mugMaxStats)}`].filter(Boolean);
     h += `<div><a href="#" id="ukw-mugf">${mugFiltersOpen ? 'Done' : 'Filters'}</a> <span class="muted">lvl ${esc(cfg.mugLvlMin)}-${esc(cfg.mugLvlMax)}${active.length ? ', ' + active.join(', ') : ''}</span></div>`;
     if (mugFiltersOpen) {
       const ck = (k, label) => `<label><input type="checkbox" data-m="${k}" ${cfg[k] ? 'checked' : ''}> ${label}</label>`;
       h += `<div class="filters">
         Level <input type="number" data-m="mugLvlMin" min="1" max="100" value="${esc(cfg.mugLvlMin)}">to <input type="number" data-m="mugLvlMax" min="1" max="100" value="${esc(cfg.mugLvlMax)}"><br>
         Max stats (FFScouter) <input type="text" data-m="mugMaxStats" placeholder="e.g. 500m" value="${esc(cfg.mugMaxStats)}"><br>
-        ${ck('mugActive', 'Online/idle')} ${ck('mugNoFaction', 'No faction')} ${ck('mugBazaar', 'Bazaar open')} ${ck('mugDonator', 'Donator')}<br>
+        ${ck('mugActive', 'Online/idle')} ${ck('mugNoFaction', 'No faction')} ${ck('mugBazaar', 'Bazaar open')} ${ck('mugDonator', 'Donator')} ${ck('mugHideHosp', 'Hide in hospital')}<br>
         ${ck('mugWatch', 'Alert when they land')} checking up to <input type="number" data-m="mugWatchCap" min="1" max="30" value="${esc(cfg.mugWatchCap)}">players
         <div class="muted">Each player checked costs one call from your API key per poll.</div>
       </div>`;
@@ -1268,6 +1313,7 @@
         p.donator && '<span class="tag2 dn">donator</span>',
         p.bounty && '<span class="tag2">bounty</span>',
         p.director && '<span class="tag2">director</span>',
+        p.hosp_cause && `<span class="tag2 ${SELF_HOSP[p.hosp_cause] ? 'self' : 'hit'}" style="margin-left:3px">${esc(hospLabel(p.hosp_cause, p.hosp_by))}</span>`,
         p.landedAt && t - p.landedAt < 900 && `<span class="tag2 lnd">landed ${fmt(t - p.landedAt)} ago</span>`,
       ].filter(Boolean).join('');
       const when = p.kind === 'out'

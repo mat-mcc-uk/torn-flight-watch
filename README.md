@@ -33,6 +33,7 @@ On PDA 3.15 or later the script saves its data in PDA's native storage (the gree
 **Country board**
 - Risky countries come first as cards, each with a flag and counts for enemies there, in hospital, and inbound with the next landing time. Your own country sits on top and opens automatically. Tap any card to see names, plane types, landing countdowns and FFScouter battle stat estimates.
 - A country is risky when any enemy is there, in hospital there, or flying there. Enemies flying home don't count.
+- Enemies in hospital abroad carry a badge with the reason: "self-hosp (Ipecac)" or "self-hosp (blood bag)" when they put themselves there, or "mugged by X", "hospitalised by X" or "lost to X". The Mug tab shows the same badges and has a "Hide in hospital" filter.
 - Safe countries fold into a row of flags. While you're in Torn, tap one to open the travel agency with that destination already selected. You still choose the ticket and press Travel yourself. The script never confirms a flight.
 
 **Your location**

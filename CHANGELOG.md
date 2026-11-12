@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.14 (12 November 2026)
+
+**Hospital reasons.** Players in hospital abroad now show why: a purple "self-hosp (Ipecac)" or "self-hosp (blood bag)" badge for self-hospitalisation, or a red "mugged by X", "hospitalised by X" or "lost to X" badge. The badges appear on the War board and in the Mug tab, and the Warn message says "self-hospitalised" for those players. The Mug filters gain "Hide in hospital". The server reads the reason from Torn's `status.details` for factions and from the hospital icon on player search results, so this costs no extra API calls. Wording it doesn't recognise is logged on the server so new methods can be added.
+
 ## 1.13.1 (12 November 2026)
 
 Added the API key and data disclosure required by Torn's API Terms of Service: a table in the README and under the API key field in Settings.

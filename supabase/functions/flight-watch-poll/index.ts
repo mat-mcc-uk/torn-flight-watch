@@ -68,13 +68,11 @@ async function scanTravellers(db: any, key: string, t: number) {
     if (j?.error) throw new Error(`scan: Torn API ${j.error.code}: ${j.error.error}`);
     for (const u of j?.search ?? []) {
       const icons = u.icons ?? [];
-      // Research: record any hospital icon so we learn whether it carries the reason.
-      for (const ic of icons) {
-        const txt = `${ic.title ?? ""} ${ic.description ?? ""}`;
-        if (/hospital/i.test(txt)) {
-          hospIcons.push({ details: `[scan icon ${ic.id}] ${String(ic.title ?? "").trim()} | ${String(ic.description ?? "").trim()}`, id: u.id, name: u.name, t });
-        }
-      }
+      // Hospital icon (15): its description is the reason, e.g. "Mugged by X" or Ipecac.
+      const hIcon = icons.find((ic: any) => ic.id === 15);
+      const hosp = hIcon ? hospCause(hIcon.description) : null;
+      // Log wordings we don't recognise yet, so new self-hosp methods can be added.
+      if (hosp && hosp.cause === "other") hospIcons.push({ details: `[scan] ${hosp.by}`, id: u.id, name: u.name, t });
       const trip = icons.find((ic: any) => ic.id === 71);
       const loc = trip ? parseTravelIcon(String(trip.title ?? "")) : null;
       if (!loc) continue;
@@ -95,6 +93,8 @@ async function scanTravellers(db: any, key: string, t: number) {
         donator: has(3) || has(4),
         bounty: has(13),
         director: has(73),
+        hosp_cause: hosp?.cause ?? null,
+        hosp_by: hosp?.by ?? null,
         seen_at: t,
       });
     }
@@ -126,6 +126,24 @@ async function scanTravellers(db: any, key: string, t: number) {
   }
   await db.from("flight_watch_meta").update(update).eq("id", 1);
   return rows.length;
+}
+
+// Torn's hospital reason (status.details, or the hospital icon on search results).
+// Self-inflicted: "Severe emesis following Ipecac Syrup ingestion", "Suffering from an acute
+// hemolytic transfusion reaction". Otherwise "Mugged by X", "Attacked by X", "Lost to X".
+function hospCause(text: unknown): { cause: string; by: string | null } | null {
+  const s = String(text ?? "").replace(/<[^>]*>/g, "").replace(/\s+/g, " ").trim();
+  if (!s) return null;
+  if (/ipecac/i.test(s)) return { cause: "ipecac", by: null };
+  if (/transfusion|hemolytic|haemolytic/i.test(s)) return { cause: "blood", by: null };
+  const m = s.match(/^(mugged by|attacked by|hospitali[sz]ed by|lost to)\s*(.*)$/i);
+  if (m) {
+    const verb = m[1].toLowerCase();
+    const cause = verb.startsWith("mugged") ? "mugged" : verb.startsWith("lost") ? "lost" : "attacked";
+    const by = m[2] && !/^someone$/i.test(m[2]) ? m[2].slice(0, 40) : null;
+    return { cause, by };
+  }
+  return { cause: "other", by: s.slice(0, 80) };
 }
 
 const namesFor = (c: string) => NAMES[c] ?? [c.toLowerCase()];
@@ -250,6 +268,7 @@ Deno.serve(async (req) => {
         const mins = loc.country && idx !== null ? DESTS[loc.country].t[idx] : null;
         const eta = loc.kind === "out" ? (s.until && s.until > t ? s.until : depart_at && mins ? depart_at + mins * 60 : null) : null;
         const biz_eta = loc.kind === "out" && plane === "airliner" && depart_at ? depart_at + DESTS[loc.country!].t[3] * 60 : null;
+        const hc = String(s.state ?? "").toLowerCase() === "hospital" ? hospCause(s.details) : null;
 
         rows.push({
           side: fac.side,
@@ -266,6 +285,8 @@ Deno.serve(async (req) => {
           plane,
           hosp: !!loc.hosp,
           hosp_until: loc.hosp ? s.until ?? null : null,
+          hosp_cause: hc?.cause ?? null,
+          hosp_by: hc?.by ?? null,
           depart_at,
           eta,
           biz_eta,
@@ -275,9 +296,9 @@ Deno.serve(async (req) => {
       }
     });
 
-    // Log each new hospital reason once per stay (fresh admission or changed wording).
+    // Log hospital wordings we don't recognise yet, once per stay.
     const hospLog = rows
-      .filter((r) => String(r.state ?? "").toLowerCase() === "hospital" && r.details)
+      .filter((r) => r.hosp_cause === "other" && r.details)
       .filter((r) => prevById.get(Number(r.player_id))?.details !== r.details)
       .map((r) => ({ details: r.details, id: r.player_id, name: r.name, t }));
     if (hospLog.length) {
