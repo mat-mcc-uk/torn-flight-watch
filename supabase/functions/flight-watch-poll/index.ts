@@ -60,6 +60,7 @@ async function scanTravellers(db: any, key: string, t: number) {
   }
   const rows: any[] = [];
   const backIds: number[] = [];
+  const hospIcons: any[] = [];
   let finished = false;
   for (let i = 0; i < SCAN_PAGES_PER_RUN && url; i++) {
     const r = await fetch(`${url}${url.includes("?") ? "&" : "?"}key=${encodeURIComponent(key)}`, { signal: AbortSignal.timeout(10000) });
@@ -67,6 +68,13 @@ async function scanTravellers(db: any, key: string, t: number) {
     if (j?.error) throw new Error(`scan: Torn API ${j.error.code}: ${j.error.error}`);
     for (const u of j?.search ?? []) {
       const icons = u.icons ?? [];
+      // Research: record any hospital icon so we learn whether it carries the reason.
+      for (const ic of icons) {
+        const txt = `${ic.title ?? ""} ${ic.description ?? ""}`;
+        if (/hospital/i.test(txt)) {
+          hospIcons.push({ details: `[scan icon ${ic.id}] ${String(ic.title ?? "").trim()} | ${String(ic.description ?? "").trim()}`, id: u.id, name: u.name, t });
+        }
+      }
       const trip = icons.find((ic: any) => ic.id === 71);
       const loc = trip ? parseTravelIcon(String(trip.title ?? "")) : null;
       if (!loc) continue;
@@ -103,6 +111,10 @@ async function scanTravellers(db: any, key: string, t: number) {
     }
     const { error } = await db.from("flight_watch_scan").upsert(rows, { onConflict: "player_id" });
     if (error) throw new Error(`scan upsert: ${error.message}`);
+  }
+  if (hospIcons.length) {
+    const { error } = await db.rpc("flight_watch_log_hosp", { p_rows: hospIcons });
+    if (error) console.error("scan hosp log", error.message);
   }
   if (backIds.length) await db.from("flight_watch_scan").delete().in("player_id", backIds);
   await db.from("flight_watch_scan").delete().lt("seen_at", t - SCAN_EXPIRE);
