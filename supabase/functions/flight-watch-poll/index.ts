@@ -30,7 +30,7 @@ const MAX_GAP = 90; // seconds, three 30-second runs
 // continuing from the last run's cursor, so the whole list is covered every ~15 minutes.
 const SCAN_FILTERS = "traveling,lastActionNow,level:>=:10";
 const SCAN_PAGES_PER_RUN = 6;     // 25 players per page; 12 API calls a minute at a 30 s cron
-const SCAN_EXPIRE = 45 * 60;      // drop players not seen for 45 minutes
+const SCAN_EXPIRE = 45 * 60;      // hard limit; normally rows go when a full pass misses them
 
 // The travel icon (id 71) names the trip: "Traveling from Torn to Japan", "Traveling from Japan to
 // Torn", or "Hiding out in Japan" / "In Japan" when they're already there.
@@ -108,6 +108,9 @@ async function scanTravellers(db: any, key: string, t: number) {
     for (const r of rows) {
       const p = prevById.get(Number(r.player_id));
       r.first_seen = p && p.kind === r.kind && p.country === r.country ? p.first_seen : t;
+      // Still "flying" after longer than the slowest ticket takes: that trip ended and this is a
+      // new one we didn't see start (a quick round trip between passes). Restart the clock.
+      if (r.kind === "out" && t - r.first_seen > DESTS[r.country].t[0] * 60 + 120) r.first_seen = t;
     }
     const { error } = await db.from("flight_watch_scan").upsert(rows, { onConflict: "player_id" });
     if (error) throw new Error(`scan upsert: ${error.message}`);
@@ -120,6 +123,9 @@ async function scanTravellers(db: any, key: string, t: number) {
   await db.from("flight_watch_scan").delete().lt("seen_at", t - SCAN_EXPIRE);
   const update: any = { scan_cursor: finished ? null : url, scan_pass_started: passStarted, scan_error: null };
   if (finished) {
+    // Anyone this whole pass didn't return has gone inactive, landed back in Torn or stopped
+    // travelling, so drop them now instead of leaving them listed as flying.
+    await db.from("flight_watch_scan").delete().lt("seen_at", passStarted - 60);
     const { count } = await db.from("flight_watch_scan").select("player_id", { count: "exact", head: true });
     update.scan_last_pass = t;
     update.scan_total = count ?? 0;

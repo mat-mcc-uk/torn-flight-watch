@@ -2,6 +2,8 @@
 
 ## 1.14 (12 November 2026)
 
+- 1.14.1: the Mug tab no longer lists players as flying long after they must have landed. The server now drops anyone a full scan pass didn't find (they went inactive, landed back in Torn or stopped travelling) instead of keeping them for 45 minutes. A flight that has outlasted the slowest ticket restarts its "seen" clock as a new trip, and the script hides any leftover that's overdue.
+
 **Hospital reasons.** Players in hospital abroad now show why: a purple "self-hosp (Ipecac)" or "self-hosp (blood bag)" badge for self-hospitalisation, or a red "mugged by X", "hospitalised by X" or "lost to X" badge. The badges appear on the War board and in the Mug tab, and the Warn message says "self-hospitalised" for those players. The Mug filters gain "Hide in hospital". The server reads the reason from Torn's `status.details` for factions and from the hospital icon on player search results, so this costs no extra API calls. Wording it doesn't recognise is logged on the server so new methods can be added.
 
 ## 1.13.1 (12 November 2026)

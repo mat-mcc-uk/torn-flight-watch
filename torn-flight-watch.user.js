@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Flight Watch
 // @namespace    mcc.torn.ukwatch
-// @version      1.14.0
+// @version      1.14.1
 // @description  Watches the factions you're at war with, shows which countries are safe or risky, and alerts when enemies fly to, land in, or leave the country you're in or heading to.
 // @author       Ripcorder [4252513]
 // @match        https://www.torn.com/*
@@ -85,7 +85,7 @@
   const SERVER_KEY = 'sb_publishable_TZNmF4f4b2bWSC5zuUCqLQ_f5c3EYQf'; // publishable, safe to ship
   const SERVER_TOKEN = '6d975e385dde1a96370823b2';
 
-  const VERSION = '1.14.0'; // keep in step with @version so the panel shows what's actually running
+  const VERSION = '1.14.1'; // keep in step with @version so the panel shows what's actually running
   const TAB_ID = Math.random().toString(36).slice(2);
   const LEADER_TTL = 20;   // seconds before another tab takes over polling
   const WAR_CHECK = 300;   // seconds between war lookups in auto enemy mode
@@ -1300,7 +1300,9 @@
     if (mugError) h += `<div class="err">${esc(mugError)}</div>`;
     if (!mugData || mugData.country !== country) return h + `<div class="muted">Loading ${esc(country)}…</div></div>`;
 
-    const list = mugData.players.filter((p) => p.kind !== 'gone' && mugPasses(p, cfg));
+    // A flight can't outlast the slowest ticket; older "flying" rows are stale scan data.
+    const overdue = (p) => p.kind === 'out' && !p.liveKind && t - p.first_seen > DESTS[country].t[0] * 60 + 120;
+    const list = mugData.players.filter((p) => p.kind !== 'gone' && !overdue(p) && mugPasses(p, cfg));
     const inbound = list.filter((p) => p.kind === 'out').sort((a, z) => a.first_seen - z.first_seen);
     const there = list.filter((p) => p.kind === 'there').sort((a, z) => (z.landedAt || 0) - (a.landedAt || 0) || a.first_seen - z.first_seen);
     const cap = Math.max(1, Math.min(30, Number(cfg.mugWatchCap) || 10));
