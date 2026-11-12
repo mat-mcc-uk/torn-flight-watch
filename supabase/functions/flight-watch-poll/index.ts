@@ -27,7 +27,9 @@ const WAR_CHECK = 300;
 const MAX_GAP = 90; // seconds, three 30-second runs
 
 // Traveller scan (mugging): page through /user/search?filters=traveling a few pages per run,
-// continuing from the last run's cursor, so the whole list is covered every ~15 minutes.
+// continuing from the last run's cursor. The list holds ~7,500 players (about half of them flying
+// home), so a pass takes ~25 minutes. 15 pages a run (30 calls a minute) hit Torn's 100-a-minute
+// account limit alongside the key owner's other tools, so it stays at 6.
 const SCAN_FILTERS = "traveling,lastActionNow,level:>=:10";
 const SCAN_PAGES_PER_RUN = 6;     // 25 players per page; 12 API calls a minute at a 30 s cron
 const SCAN_EXPIRE = 45 * 60;      // hard limit; normally rows go when a full pass misses them
