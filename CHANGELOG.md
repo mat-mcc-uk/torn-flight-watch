@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.16 (12 November 2026)
+
+**Only players I can beat.** A new Mug filter uses FFScouter's fair fight, which it works out against your own key, to hide anyone you're unlikely to beat: easy (FF ≤ 2.0, under ~40% of your stats), likely (FF ≤ 2.5, under ~55%) or any edge (FF under 3, under ~75%). Players without an estimate are hidden while it's on. Mug rows now show the FF value next to the stat estimate, and estimates are looked up before the stats filters run, so nobody is filtered out for lack of a lookup.
+
 ## 1.15 (12 November 2026)
 
 **Mug tab shows only rows it's confident about.** A scan sighting now counts for 30% of the flight time to the chosen country (at least 5 minutes): about 8 minutes for Mexico, 90 for South Africa. Older rows, and inbound players past the latest time they could land, are hidden behind "Show N stale". Inbound rows show "lands by HH:MM" (the latest possible landing) instead of how long ago the scan saw them. Live checks with your key now go to the rows closest to expiring, abroad players included, and a confirmed row gets a green edge and "✓ live" for 3 minutes. A summary line counts confirmed, scanned and hidden rows. The filter is renamed "Live checks + landing alerts".

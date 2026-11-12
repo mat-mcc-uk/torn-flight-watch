@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Flight Watch
 // @namespace    mcc.torn.ukwatch
-// @version      1.15.0
+// @version      1.16.0
 // @description  Watches the factions you're at war with, shows which countries are safe or risky, and alerts when enemies fly to, land in, or leave the country you're in or heading to.
 // @author       Ripcorder [4252513]
 // @match        https://www.torn.com/*
@@ -73,6 +73,7 @@
     mugBazaar: false,
     mugDonator: false,
     mugHideHosp: false,
+    mugBeat: '',               // '' off, or 'easy' / 'likely' / 'edge': only players FFScouter says you can beat
     mugWatch: true,            // check inbound players and alert the moment they land
     mugWatchCap: 10,           // how many players to check live each poll (1 API call each)           // list faction mates flying into danger, with a Warn button
     serverToken: '',           // leave blank to use the built-in token; paste a new one here after a rotation
@@ -85,7 +86,7 @@
   const SERVER_KEY = 'sb_publishable_TZNmF4f4b2bWSC5zuUCqLQ_f5c3EYQf'; // publishable, safe to ship
   const SERVER_TOKEN = '6d975e385dde1a96370823b2';
 
-  const VERSION = '1.15.0'; // keep in step with @version so the panel shows what's actually running
+  const VERSION = '1.16.0'; // keep in step with @version so the panel shows what's actually running
   const TAB_ID = Math.random().toString(36).slice(2);
   const LEADER_TTL = 20;   // seconds before another tab takes over polling
   const WAR_CHECK = 300;   // seconds between war lookups in auto enemy mode
@@ -552,6 +553,10 @@
       ffError = (e && e.message) || 'lookup failed';
     }
   }
+  const ffLabel = (id) => {
+    const c = ffFor(id);
+    return c && c.ff != null ? ` · FF ${Number(c.ff).toFixed(2)}` : '';
+  };
   const statsLabel = (id) => {
     const c = ffFor(id);
     return c && c.h ? `~${c.h}` : '';
@@ -578,17 +583,32 @@
     return Number(m[1]) * ({ k: 1e3, m: 1e6, b: 1e9, t: 1e12 }[m[2]] || 1);
   };
   const mugTarget = (cfg, meta) => cfg.mugCountry || (meta && meta.myDest) || '';
-  function mugPasses(p, cfg) {
+  // Torn's fair fight is 1 + 8/3 x (their stats / yours), capped at 3, and FFScouter works it out
+  // against the key owner. So FF tells us their stats as a share of yours: 2.0 is ~38%, 2.5 ~56%,
+  // anything under 3 is below 75%. At 3 they could be stronger than you.
+  const MUG_BEAT = {
+    easy: { ff: 2.0, label: 'easy (FF ≤ 2.0, under ~40% of your stats)' },
+    likely: { ff: 2.5, label: 'likely (FF ≤ 2.5, under ~55%)' },
+    edge: { ff: 2.99, label: 'any edge (FF under 3, under ~75%)' },
+  };
+  function mugPasses(p, cfg, withStats = true) {
     if (p.level < (Number(cfg.mugLvlMin) || 0) || p.level > (Number(cfg.mugLvlMax) || 100)) return false;
     if (cfg.mugActive && p.online !== 'Online' && p.online !== 'Idle') return false;
     if (cfg.mugNoFaction && p.faction_id) return false;
     if (cfg.mugBazaar && !p.bazaar) return false;
     if (cfg.mugDonator && !p.donator) return false;
     if (cfg.mugHideHosp && p.hosp_cause) return false;
+    if (!withStats) return true;
     const max = parseStats(cfg.mugMaxStats);
     if (max) {
       const c = ffFor(p.id);
       if (c && c.est != null && c.est > max) return false;
+    }
+    const beat = MUG_BEAT[cfg.mugBeat];
+    if (beat) {
+      // No estimate means no confidence, so they're left out.
+      const c = ffFor(p.id);
+      if (!c || c.ff == null || Number(c.ff) > beat.ff) return false;
     }
     return true;
   }
@@ -643,8 +663,14 @@
       }
     }
     if (!mugData || mugData.country !== country) return;
-    const list = mugData.players.filter((p) => mugPasses(p, cfg));
-    refreshFF(cfg, list.slice(0, 150).map((p) => p.id));
+    // Look up estimates before the stats filters run, freshest rows first, so a player missing an
+    // estimate isn't filtered out before we've even asked FFScouter about them.
+    const rankC = { live: 0, scan: 1, aging: 2, stale: 3 };
+    const base = mugData.players
+      .filter((p) => (p.kind === 'out' || p.kind === 'there') && mugPasses(p, cfg, false))
+      .sort((a, z) => rankC[mugConf(a, country, t).state] - rankC[mugConf(z, country, t).state]);
+    await refreshFF(cfg, base.slice(0, 200).map((p) => p.id));
+    const list = base.filter((p) => mugPasses(p, cfg));
 
     // Live check: spend the per-poll budget where the doubt is. Inbound players come first, in
     // round-robin order (never checked, then longest since their last check; ties go to the row
@@ -1338,13 +1364,15 @@
     if (!country) return h + `<div class="muted">You're in Torn. Pick a country above, or fly somewhere and "Mine" follows you.</div></div>`;
 
     const max = parseStats(cfg.mugMaxStats);
-    const active = [cfg.mugActive && 'active', cfg.mugNoFaction && 'no faction', cfg.mugBazaar && 'bazaar', cfg.mugDonator && 'donator', cfg.mugHideHosp && 'not in hosp', max && `stats ≤ ${esc(cfg.mugMaxStats)}`].filter(Boolean);
+    const active = [cfg.mugActive && 'active', cfg.mugNoFaction && 'no faction', cfg.mugBazaar && 'bazaar', cfg.mugDonator && 'donator', cfg.mugHideHosp && 'not in hosp', MUG_BEAT[cfg.mugBeat] && `can beat: ${cfg.mugBeat === 'edge' ? 'any edge' : cfg.mugBeat}`, max && `stats ≤ ${esc(cfg.mugMaxStats)}`].filter(Boolean);
     h += `<div><a href="#" id="ukw-mugf">${mugFiltersOpen ? 'Done' : 'Filters'}</a> <span class="muted">lvl ${esc(cfg.mugLvlMin)}-${esc(cfg.mugLvlMax)}${active.length ? ', ' + active.join(', ') : ''}</span></div>`;
     if (mugFiltersOpen) {
       const ck = (k, label) => `<label><input type="checkbox" data-m="${k}" ${cfg[k] ? 'checked' : ''}> ${label}</label>`;
       h += `<div class="filters">
         Level <input type="number" data-m="mugLvlMin" min="1" max="100" value="${esc(cfg.mugLvlMin)}">to <input type="number" data-m="mugLvlMax" min="1" max="100" value="${esc(cfg.mugLvlMax)}"><br>
         Max stats (FFScouter) <input type="text" data-m="mugMaxStats" placeholder="e.g. 500m" value="${esc(cfg.mugMaxStats)}"><br>
+        Only players I can beat <select data-m="mugBeat">${[['', 'off'], ...Object.entries(MUG_BEAT).map(([k, v]) => [k, v.label])].map(([k, l]) => `<option value="${k}" ${cfg.mugBeat === k ? 'selected' : ''}>${esc(l)}</option>`).join('')}</select>
+        <div class="muted">Uses FFScouter's fair fight against your key. Players without an estimate are hidden while this is on.${cfg.showStats ? '' : ' <span class="err">Turn on FFScouter estimates in Settings first.</span>'}</div>
         ${ck('mugActive', 'Online/idle')} ${ck('mugNoFaction', 'No faction')} ${ck('mugBazaar', 'Bazaar open')} ${ck('mugDonator', 'Donator')} ${ck('mugHideHosp', 'Hide in hospital')}<br>
         ${ck('mugWatch', 'Live checks + landing alerts')} checking up to <input type="number" data-m="mugWatchCap" min="1" max="30" value="${esc(cfg.mugWatchCap)}">players
         <div class="muted">Each player checked costs one call from your API key per poll.</div>
@@ -1379,7 +1407,7 @@
         ? (t < c.latest ? `lands by ${clock(c.latest)} (≤ ${fmt(c.latest - t)})` : 'should have landed')
         : 'there';
       const checking = mugChecking.has(p.id) && c.state !== 'live' ? ' · checking' : '';
-      return `<div class="mrow c-${c.state}"><div class="info"><span class="dot ${esc(p.online || '')}"></span><a href="https://www.torn.com/profiles.php?XID=${p.id}">${esc(p.name)}</a> <span class="muted">${p.level}${est ? ` · ${esc(est)}` : ''}</span>${tags}<br><span class="muted">${where} · </span>${src}<span class="muted">${checking}</span></div><a class="atk" href="https://www.torn.com/loader.php?sid=attack&user2ID=${p.id}">Attack</a></div>`;
+      return `<div class="mrow c-${c.state}"><div class="info"><span class="dot ${esc(p.online || '')}"></span><a href="https://www.torn.com/profiles.php?XID=${p.id}">${esc(p.name)}</a> <span class="muted">${p.level}${est ? ` · ${esc(est)}` : ''}${ffLabel(p.id)}</span>${tags}<br><span class="muted">${where} · </span>${src}<span class="muted">${checking}</span></div><a class="atk" href="https://www.torn.com/loader.php?sid=attack&user2ID=${p.id}">Attack</a></div>`;
     };
     const age = mugData.meta && mugData.meta.last_pass ? ` Full scan ${fmt(t - mugData.meta.last_pass)} ago.` : '';
     h += `<div class="confsum"><b>${nLive}</b> confirmed live · <b>${nScan}</b> from scan · ${hidden} hidden as stale</div>`;
@@ -1529,7 +1557,8 @@
         else c[k] = el.value.trim();
         setCfg(c);
         if (k === 'mugOn') { lastMugFetch = 0; lastPoll = 0; }
-        if (el.type === 'checkbox') render();
+        if (el.type === 'checkbox' || el.tagName === 'SELECT') render();
+        if (k === 'mugBeat') lastPoll = 0; // look up estimates for the list straight away
       };
     });
     panel.querySelectorAll('[data-c]').forEach((el) => {

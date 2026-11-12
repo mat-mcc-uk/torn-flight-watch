@@ -97,7 +97,7 @@ This is how Flight Watch uses your API key and the data it fetches, in the forma
 | Alert switches | Turn each alert on or off. |
 | Show faction mates in danger | The danger list and Warn buttons. |
 | Show FFScouter battle stat estimates | Estimates in the panel and in warnings. |
-| Mug tab | Scan on/off, country, filters, live checks and landing alerts, and how many players it checks per poll. Set inside the tab. Rows show only while the data is fresh: a scan sighting counts for 30% of the flight time (at least 5 minutes), and live checks go to the rows closest to expiring. Older rows sit behind "Show N stale". |
+| Mug tab | Scan on/off, country, filters, live checks and landing alerts, and how many players it checks per poll. Set inside the tab. Rows show only while the data is fresh: a scan sighting counts for 30% of the flight time (at least 5 minutes), and live checks go to the rows closest to expiring. Older rows sit behind "Show N stale". "Only players I can beat" hides anyone whose FFScouter fair fight (against your key) is above the level you pick. |
 
 ## How landing times are worked out
 
