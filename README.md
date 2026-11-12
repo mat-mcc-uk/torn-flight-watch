@@ -69,6 +69,18 @@ On PDA 3.15 or later the script saves its data in PDA's native storage (the gree
 
 Alerts show as browser notifications and an on-page toast, and can also post to a Discord webhook.
 
+## API key and data (Torn API Terms of Service)
+
+This is how Flight Watch uses your API key and the data it fetches, in the format Torn's [API Terms of Service](https://www.torn.com/api.html) ask for. The same table is shown under the API key field in the script's Settings.
+
+| | Flight Watch |
+| --- | --- |
+| **Data Storage** | **Your key's data:** only on your device (Tampermonkey or Torn PDA storage), covering your settings, your current location and cached battle stat estimates. **Flight Watch server:** stores public Torn data it fetches with its own key: locations and travel times of your faction's and war enemies' members, and active travellers found by the traveller scan (name, level, faction ID, location, profile icons). Traveller entries are deleted after 45 minutes unseen. Faction entries are refreshed every 30 seconds and removed when a faction is no longer tracked. |
+| **Data Sharing** | Nothing fetched with your key is sent to the Flight Watch server. The server's data can be read by anyone running Flight Watch. FFScouter receives the IDs of the players you look up. If you set a Discord webhook, alert text is posted there. |
+| **Purpose of Use** | Public community tool: a gameplay utility for travel safety, war awareness and finding mugging targets. |
+| **Key Storage & Sharing** | Stored only on your device. Never sent to the Flight Watch server. Sent to api.torn.com, and to ffscouter.com for battle stat estimates (turn off "Show FFScouter battle stat estimates" to stop that, or set a separate FFScouter key). The server's own key is stored as a private secret on the server and is never sent to users. |
+| **Key Access Level** | Public. |
+
 ## Settings
 
 | Setting | What it does |

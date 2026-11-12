@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.13.1 (12 November 2026)
+
+Added the API key and data disclosure required by Torn's API Terms of Service: a table in the README and under the API key field in Settings.
+
 ## 1.13 (10 November 2026)
 
 **Draggable button.** Drag the Flight Watch button anywhere; the position is remembered per device and survives rotation. The panel opens next to the button (above it in the lower half of the screen, below it in the upper half). A tap still opens the panel, including on touch screens that don't send a click after a drag. Settings has a link to put the button back in the corner.

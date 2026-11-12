@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Flight Watch
 // @namespace    mcc.torn.ukwatch
-// @version      1.13.0
+// @version      1.13.1
 // @description  Watches the factions you're at war with, shows which countries are safe or risky, and alerts when enemies fly to, land in, or leave the country you're in or heading to.
 // @author       Ripcorder [4252513]
 // @match        https://www.torn.com/*
@@ -84,7 +84,7 @@
   const SERVER_KEY = 'sb_publishable_TZNmF4f4b2bWSC5zuUCqLQ_f5c3EYQf'; // publishable, safe to ship
   const SERVER_TOKEN = '6d975e385dde1a96370823b2';
 
-  const VERSION = '1.13.0'; // keep in step with @version so the panel shows what's actually running
+  const VERSION = '1.13.1'; // keep in step with @version so the panel shows what's actually running
   const TAB_ID = Math.random().toString(36).slice(2);
   const LEADER_TTL = 20;   // seconds before another tab takes over polling
   const WAR_CHECK = 300;   // seconds between war lookups in auto enemy mode
@@ -970,6 +970,10 @@
     #ukw-panel .filters{background:#202329;border:1px solid #31353c;border-radius:6px;padding:6px 8px;margin:4px 0 8px}
     #ukw-panel .filters label{margin-right:8px;white-space:nowrap}
     #ukw-panel .filters input[type=number],#ukw-panel .filters input[type=text]{width:60px;display:inline-block;margin:2px 4px 2px 0}
+    #ukw-panel details.tos{margin:0 0 6px;background:#202329;border:1px solid #31353c;border-radius:6px;padding:4px 6px}
+    #ukw-panel details.tos summary{cursor:pointer;color:#6fb3ff}
+    #ukw-panel details.tos td{font-size:11px;padding:3px 2px;vertical-align:top}
+    #ukw-panel details.tos td:first-child{color:#fff;white-space:nowrap;padding-right:6px}
     #ukw-toast{position:fixed;left:50%;top:60px;transform:translateX(-50%);z-index:100000;background:#1d3b5c;color:#fff;padding:8px 12px;border-radius:6px;font:13px Arial;display:none;max-width:90vw}
   `;
   const style = document.createElement('style');
@@ -1095,6 +1099,13 @@
     return `<div class="sec">
       <h4>Settings</h4>
       Public API key<input type="text" data-k="apiKey" value="${esc(c.apiKey)}">
+      <details class="tos" open><summary>How your key and data are used (Torn API ToS)</summary><table>
+        <tr><td>Data storage</td><td>Your data: only on this device. The Flight Watch server stores public data it fetches with its own key (faction, enemy and traveller locations); travellers are deleted after 45 min unseen.</td></tr>
+        <tr><td>Data sharing</td><td>Nothing from your key goes to the Flight Watch server. Server data is readable by everyone using Flight Watch. FFScouter gets the IDs you look up. Discord gets alerts if you set a webhook.</td></tr>
+        <tr><td>Purpose of use</td><td>Public community tool (gameplay utility).</td></tr>
+        <tr><td>Key storage &amp; sharing</td><td>Stored only on this device. Sent to api.torn.com, and to ffscouter.com for stat estimates (switch those off below to stop it). Never sent to the Flight Watch server.</td></tr>
+        <tr><td>Key access level</td><td>Public.</td></tr>
+      </table></details>
       Enemy
       <select data-k="enemyMode">
         <option value="auto" ${c.enemyMode === 'auto' ? 'selected' : ''}>Whoever we're at war with</option>
