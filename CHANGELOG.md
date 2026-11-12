@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.15 (12 November 2026)
+
+**Mug tab shows only rows it's confident about.** A scan sighting now counts for 30% of the flight time to the chosen country (at least 5 minutes): about 8 minutes for Mexico, 90 for South Africa. Older rows, and inbound players past the latest time they could land, are hidden behind "Show N stale". Inbound rows show "lands by HH:MM" (the latest possible landing) instead of how long ago the scan saw them. Live checks with your key now go to the rows closest to expiring, abroad players included, and a confirmed row gets a green edge and "✓ live" for 3 minutes. A summary line counts confirmed, scanned and hidden rows. The filter is renamed "Live checks + landing alerts".
+
 ## 1.14 (12 November 2026)
 
 - 1.14.2: drug overdoses get their own amber badge, e.g. "overdose (Xanax)", separate from self-hospitalisation.

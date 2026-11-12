@@ -97,7 +97,7 @@ This is how Flight Watch uses your API key and the data it fetches, in the forma
 | Alert switches | Turn each alert on or off. |
 | Show faction mates in danger | The danger list and Warn buttons. |
 | Show FFScouter battle stat estimates | Estimates in the panel and in warnings. |
-| Mug tab | Scan on/off, country, filters, landing alert and how many players it checks. Set inside the tab. |
+| Mug tab | Scan on/off, country, filters, live checks and landing alerts, and how many players it checks per poll. Set inside the tab. Rows show only while the data is fresh: a scan sighting counts for 30% of the flight time (at least 5 minutes), and live checks go to the rows closest to expiring. Older rows sit behind "Show N stale". |
 
 ## How landing times are worked out
 
@@ -121,7 +121,7 @@ The server runs on Supabase. It polls your faction and the enemy factions every 
 
 - `supabase/functions/flight-watch-poll` is called by `pg_cron` every 30 seconds. It works out who the faction is at war with (rechecked every 5 minutes) and fetches the enemy members and your own faction's members. It stores each player's location and estimated takeoff time, with your own faction marked `side = 'friend'`.
 - `flight_watch_read` is a database function, called through Supabase's REST API. It returns enemies away from Torn as `members` and faction mates away as `friends`. It checks the read token and allows up to 4 fresh reads per IP every 10 seconds, using the IP Cloudflare attaches to the request, which clients can't fake. Reads this way don't count against the edge function quota.
-- The same function also runs the traveller scan for the Mug tab, after the war tracking so a scan error can't affect it. Results go to `flight_watch_scan`, and players not seen for 45 minutes are dropped. `flight_watch_scan_read` returns one country's travellers, with the same rate limit.
+- The same function also runs the traveller scan for the Mug tab, after the war tracking so a scan error can't affect it. Results go to `flight_watch_scan`. At the end of each full pass (about 25 minutes) anyone the pass didn't find is dropped, with a 45-minute hard limit. `flight_watch_scan_read` returns one country's travellers, with the same rate limit.
 - `supabase/functions/flight-watch-read` is retired. It's kept only to tell very old script versions to update.
 - `supabase/migrations` holds the tables, the read function and the cron job.
 

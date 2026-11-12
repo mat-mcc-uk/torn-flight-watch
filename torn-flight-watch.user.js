@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Flight Watch
 // @namespace    mcc.torn.ukwatch
-// @version      1.14.2
+// @version      1.15.0
 // @description  Watches the factions you're at war with, shows which countries are safe or risky, and alerts when enemies fly to, land in, or leave the country you're in or heading to.
 // @author       Ripcorder [4252513]
 // @match        https://www.torn.com/*
@@ -74,7 +74,7 @@
     mugDonator: false,
     mugHideHosp: false,
     mugWatch: true,            // check inbound players and alert the moment they land
-    mugWatchCap: 10,           // how many inbound players to check each poll (1 API call each)           // list faction mates flying into danger, with a Warn button
+    mugWatchCap: 10,           // how many players to check live each poll (1 API call each)           // list faction mates flying into danger, with a Warn button
     serverToken: '',           // leave blank to use the built-in token; paste a new one here after a rotation
   };
 
@@ -85,7 +85,7 @@
   const SERVER_KEY = 'sb_publishable_TZNmF4f4b2bWSC5zuUCqLQ_f5c3EYQf'; // publishable, safe to ship
   const SERVER_TOKEN = '6d975e385dde1a96370823b2';
 
-  const VERSION = '1.14.2'; // keep in step with @version so the panel shows what's actually running
+  const VERSION = '1.15.0'; // keep in step with @version so the panel shows what's actually running
   const TAB_ID = Math.random().toString(36).slice(2);
   const LEADER_TTL = 20;   // seconds before another tab takes over polling
   const WAR_CHECK = 300;   // seconds between war lookups in auto enemy mode
@@ -570,6 +570,8 @@
   let mugError = '';
   const mugSeen = {};          // id -> last live kind seen by the landing watch ('out' / 'there' / ...)
   const mugLanded = {};        // id -> time we saw them land
+  let mugChecking = new Set(); // ids picked for the latest live check
+  let mugShowStale = false;    // "show N older" toggle
   const parseStats = (txt) => {
     const m = String(txt || '').trim().toLowerCase().match(/^([\d.]+)\s*([kmbt])?$/);
     if (!m) return null;
@@ -590,6 +592,31 @@
     }
     return true;
   }
+  // How sure we are about a scanned player. The scan only proves they were flying (or abroad) at
+  // their last sighting; how long that stays true depends on the route, so the allowance is 30% of
+  // the standard flight time (5 minutes at least). A live check with the viewer's key resets it.
+  //   latest: the latest they can land. They took off before the scan first saw them, so even on
+  //           the slowest ticket they're down by first_seen + standard time.
+  //   state:  'live' (checked live in the last 3 minutes), 'scan' (fresh), 'aging' (near the
+  //           allowance), 'stale' (past it, or past the latest landing): hidden by default.
+  const MUG_LIVE_FRESH = 180;
+  function mugConf(p, country, t) {
+    const std = DESTS[country].t[0] * 60;
+    const allowed = Math.max(300, Math.round(std * 0.3));
+    const latest = p.kind === 'out' ? p.first_seen + std : null;
+    const liveOk = p.liveAt && t - p.liveAt <= MUG_LIVE_FRESH && p.liveKind === p.kind;
+    const basis = Math.max(p.seen_at || 0, p.liveAt && p.liveKind === p.kind ? p.liveAt : 0);
+    const age = t - basis;
+    let state;
+    if (liveOk) state = 'live';
+    else if (latest && t > latest) state = 'stale';
+    else if (age > allowed) state = 'stale';
+    else if (age > allowed * 0.7) state = 'aging';
+    else state = 'scan';
+    // 0 = just confirmed, 1 = at the allowance; the live check works on the highest first.
+    return { state, age, allowed, latest, doubt: age / allowed };
+  }
+
   async function pollMug(cfg, t, meta) {
     const country = mugTarget(cfg, meta);
     if (!cfg.mugOn || !country) return;
@@ -602,7 +629,9 @@
           const old = mugData && mugData.country === country ? new Map(mugData.players.map((x) => [x.id, x])) : new Map();
           j.players.forEach((x) => {
             const o = old.get(x.id);
-            if (o && o.liveKind) Object.assign(x, { kind: o.kind, liveKind: o.liveKind, landedAt: o.landedAt });
+            if (o && o.liveKind) {
+              Object.assign(x, { kind: o.kind, liveKind: o.liveKind, liveAt: o.liveAt, landedAt: o.landedAt, hosp_cause: o.hosp_cause, hosp_by: o.hosp_by });
+            }
           });
           mugData = { country, at: j.now || t, players: j.players, meta: j.meta || {} };
           mugError = '';
@@ -617,11 +646,22 @@
     const list = mugData.players.filter((p) => mugPasses(p, cfg));
     refreshFF(cfg, list.slice(0, 150).map((p) => p.id));
 
-    // Landing watch: check the live status of inbound players, longest-flying first.
+    // Live check: spend the per-poll budget where the doubt is. Inbound players come first, in
+    // round-robin order (never checked, then longest since their last check; ties go to the row
+    // closest to expiring), so landings are caught and every inbound row gets confirmed in turn.
+    // Players abroad come next, at most once every 2 minutes each. Rows far past their allowance
+    // (3x) or well past their latest landing are left alone.
     if (!cfg.mugWatch) return;
     const cap = Math.max(1, Math.min(30, Number(cfg.mugWatchCap) || 10));
-    const inbound = list.filter((p) => p.kind === 'out').sort((a, z) => a.first_seen - z.first_seen).slice(0, cap);
-    await Promise.all(inbound.map(async (p) => {
+    const picks = list
+      .filter((p) => p.kind === 'out' || (p.kind === 'there' && (!p.liveAt || t - p.liveAt >= 120)))
+      .map((p) => ({ p, c: mugConf(p, country, t) }))
+      .filter(({ p, c }) => p.liveAt || (c.doubt <= 3 && (!c.latest || t <= c.latest + c.allowed)))
+      .sort((a, z) => (a.p.kind === z.p.kind ? 0 : a.p.kind === 'out' ? -1 : 1) || (a.p.liveAt || 0) - (z.p.liveAt || 0) || z.c.doubt - a.c.doubt)
+      .slice(0, cap)
+      .map(({ p }) => p);
+    mugChecking = new Set(picks.map((p) => p.id));
+    await Promise.all(picks.map(async (p) => {
       try {
         const b = await api(`user/${p.id}/basic?striptags=true`, cfg.apiKey);
         const st = (b && b.profile && b.profile.status) || {};
@@ -631,10 +671,12 @@
         p.hosp_by = hc ? hc.by : null;
         const before = mugSeen[p.id];
         mugSeen[p.id] = loc.kind;
-        p.liveKind = loc.kind;
+        p.liveKind = loc.kind === 'there' && loc.country === country ? 'there' : loc.kind === 'out' && loc.country === country ? 'out' : 'gone';
+        p.liveAt = t;
         if (loc.kind === 'there' && loc.country === country) {
           p.kind = 'there';
-          p.landedAt = p.landedAt || t;
+          // Only a check that saw them flying last time pins down when they landed.
+          if (before === 'out') p.landedAt = p.landedAt || t;
           if (before === 'out' && !mugLanded[p.id]) {
             mugLanded[p.id] = t;
             const est = statsLabel(p.id);
@@ -1006,6 +1048,12 @@
     #ukw-panel .mrow .atk{background:#7a1f1f;border:1px solid #c0392b;color:#fff;border-radius:4px;padding:3px 8px;font-size:11px;font-weight:bold}
     #ukw-panel .dot{display:inline-block;width:7px;height:7px;border-radius:50%;margin-right:3px;background:#555}
     #ukw-panel .dot.Online{background:#2ecc71}
+    #ukw-panel .mrow.c-live{border-left:3px solid #2ecc71;padding-left:5px}
+    #ukw-panel .mrow.c-aging{opacity:.65}
+    #ukw-panel .mrow.c-stale{opacity:.4}
+    #ukw-panel .conf{font-size:11px;color:#8a9099}
+    #ukw-panel .conf.live{color:#2ecc71;font-weight:bold}
+    #ukw-panel .confsum{font-size:11px;color:#aab;margin:4px 0}
     #ukw-panel .dot.Idle{background:#f1c40f}
     #ukw-panel .tag2{display:inline-block;font-size:10px;border-radius:8px;padding:0 5px;margin-left:3px;background:#33373e;color:#d7d9dd}
     #ukw-panel .tag2.bz{background:#1e4a5c;color:#bde7ff}
@@ -1298,21 +1346,24 @@
         Level <input type="number" data-m="mugLvlMin" min="1" max="100" value="${esc(cfg.mugLvlMin)}">to <input type="number" data-m="mugLvlMax" min="1" max="100" value="${esc(cfg.mugLvlMax)}"><br>
         Max stats (FFScouter) <input type="text" data-m="mugMaxStats" placeholder="e.g. 500m" value="${esc(cfg.mugMaxStats)}"><br>
         ${ck('mugActive', 'Online/idle')} ${ck('mugNoFaction', 'No faction')} ${ck('mugBazaar', 'Bazaar open')} ${ck('mugDonator', 'Donator')} ${ck('mugHideHosp', 'Hide in hospital')}<br>
-        ${ck('mugWatch', 'Alert when they land')} checking up to <input type="number" data-m="mugWatchCap" min="1" max="30" value="${esc(cfg.mugWatchCap)}">players
+        ${ck('mugWatch', 'Live checks + landing alerts')} checking up to <input type="number" data-m="mugWatchCap" min="1" max="30" value="${esc(cfg.mugWatchCap)}">players
         <div class="muted">Each player checked costs one call from your API key per poll.</div>
       </div>`;
     }
     if (mugError) h += `<div class="err">${esc(mugError)}</div>`;
     if (!mugData || mugData.country !== country) return h + `<div class="muted">Loading ${esc(country)}…</div></div>`;
 
-    // A flight can't outlast the slowest ticket; older "flying" rows are stale scan data.
-    const overdue = (p) => p.kind === 'out' && !p.liveKind && t - p.first_seen > DESTS[country].t[0] * 60 + 120;
-    const list = mugData.players.filter((p) => p.kind !== 'gone' && !overdue(p) && mugPasses(p, cfg));
-    const inbound = list.filter((p) => p.kind === 'out').sort((a, z) => a.first_seen - z.first_seen);
-    const there = list.filter((p) => p.kind === 'there').sort((a, z) => (z.landedAt || 0) - (a.landedAt || 0) || a.first_seen - z.first_seen);
-    const cap = Math.max(1, Math.min(30, Number(cfg.mugWatchCap) || 10));
-    const watched = new Set(cfg.mugWatch ? inbound.slice(0, cap).map((p) => p.id) : []);
+    const all = mugData.players.filter((p) => p.kind !== 'gone' && mugPasses(p, cfg)).map((p) => Object.assign(p, { _c: mugConf(p, country, t) }));
+    const shown = all.filter((p) => mugShowStale || p._c.state !== 'stale');
+    const hidden = all.length - all.filter((p) => p._c.state !== 'stale').length;
+    const rank = { live: 0, scan: 1, aging: 2, stale: 3 };
+    const inbound = shown.filter((p) => p.kind === 'out').sort((a, z) => rank[a._c.state] - rank[z._c.state] || a._c.latest - z._c.latest);
+    const there = shown.filter((p) => p.kind === 'there').sort((a, z) => rank[a._c.state] - rank[z._c.state] || (z.landedAt || 0) - (a.landedAt || 0) || a._c.age - z._c.age);
+    const nLive = all.filter((p) => p._c.state === 'live').length;
+    const nScan = all.filter((p) => p._c.state === 'scan' || p._c.state === 'aging').length;
+    const clock = (ts) => new Date(ts * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
     const row = (p) => {
+      const c = p._c;
       const est = statsLabel(p.id);
       const tags = [
         !p.faction_id && '<span class="tag2">no faction</span>',
@@ -1323,17 +1374,21 @@
         p.hosp_cause && `<span class="tag2 ${hospClass(p.hosp_cause)}" style="margin-left:3px">${esc(hospLabel(p.hosp_cause, p.hosp_by))}</span>`,
         p.landedAt && t - p.landedAt < 900 && `<span class="tag2 lnd">landed ${fmt(t - p.landedAt)} ago</span>`,
       ].filter(Boolean).join('');
-      const when = p.kind === 'out'
-        ? `flying, seen ${fmt(t - p.first_seen)} ago${watched.has(p.id) ? ' · watching' : ''}`
-        : `there, seen ${fmt(t - p.first_seen)} ago`;
-      return `<div class="mrow"><div class="info"><span class="dot ${esc(p.online || '')}"></span><a href="https://www.torn.com/profiles.php?XID=${p.id}">${esc(p.name)}</a> <span class="muted">${p.level}${est ? ` · ${esc(est)}` : ''}</span>${tags}<br><span class="muted">${when}</span></div><a class="atk" href="https://www.torn.com/loader.php?sid=attack&user2ID=${p.id}">Attack</a></div>`;
+      const src = c.state === 'live' ? `<span class="conf live">✓ live ${fmt(t - p.liveAt)} ago</span>` : `<span class="conf">scan ${fmt(c.age)} ago</span>`;
+      const where = p.kind === 'out'
+        ? (t < c.latest ? `lands by ${clock(c.latest)} (≤ ${fmt(c.latest - t)})` : 'should have landed')
+        : 'there';
+      const checking = mugChecking.has(p.id) && c.state !== 'live' ? ' · checking' : '';
+      return `<div class="mrow c-${c.state}"><div class="info"><span class="dot ${esc(p.online || '')}"></span><a href="https://www.torn.com/profiles.php?XID=${p.id}">${esc(p.name)}</a> <span class="muted">${p.level}${est ? ` · ${esc(est)}` : ''}</span>${tags}<br><span class="muted">${where} · </span>${src}<span class="muted">${checking}</span></div><a class="atk" href="https://www.torn.com/loader.php?sid=attack&user2ID=${p.id}">Attack</a></div>`;
     };
-    const age = mugData.meta && mugData.meta.last_pass ? ` · full scan ${fmt(t - mugData.meta.last_pass)} ago` : '';
+    const age = mugData.meta && mugData.meta.last_pass ? ` Full scan ${fmt(t - mugData.meta.last_pass)} ago.` : '';
+    h += `<div class="confsum"><b>${nLive}</b> confirmed live · <b>${nScan}</b> from scan · ${hidden} hidden as stale</div>`;
     h += `<h4>${flag(country)} Flying to ${esc(country)} (${inbound.length})</h4>`;
-    h += inbound.length ? inbound.slice(0, 60).map(row).join('') : `<div class="muted">Nobody matching your filters.</div>`;
+    h += inbound.length ? inbound.slice(0, 60).map(row).join('') : `<div class="muted">Nobody we're confident about.</div>`;
     h += `<h4>In ${esc(country)} now (${there.length})</h4>`;
-    h += there.length ? there.slice(0, 60).map(row).join('') : `<div class="muted">Nobody matching your filters.</div>`;
-    h += `<div class="muted" style="margin-top:6px">From the server's scan of active travellers${age}. Search results can lag a little; "watching" players are checked live.</div>`;
+    h += there.length ? there.slice(0, 60).map(row).join('') : `<div class="muted">Nobody we're confident about.</div>`;
+    if (hidden) h += `<div style="margin-top:6px"><a href="#" id="ukw-stale">${mugShowStale ? 'Hide' : 'Show'} ${hidden} stale</a></div>`;
+    h += `<div class="muted" style="margin-top:6px">A scan sighting counts for 30% of the flight time to ${esc(country)} (${fmt(Math.max(300, Math.round(DESTS[country].t[0] * 18)))}); older rows are hidden.${age}${cfg.mugWatch ? ' Live checks (your key) go to the rows closest to expiring.' : ' Turn on "Live checks" in Filters to confirm rows live.'}</div>`;
     return h + `</div>`;
   }
 
@@ -1461,6 +1516,8 @@
         render();
       };
     });
+    const st = panel.querySelector('#ukw-stale');
+    if (st) st.onclick = (e) => { e.preventDefault(); mugShowStale = !mugShowStale; render(); };
     const mf = panel.querySelector('#ukw-mugf');
     if (mf) mf.onclick = (e) => { e.preventDefault(); mugFiltersOpen = !mugFiltersOpen; render(); };
     panel.querySelectorAll('[data-m]').forEach((el) => {
