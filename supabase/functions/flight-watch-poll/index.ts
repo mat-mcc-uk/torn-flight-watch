@@ -144,6 +144,8 @@ function hospCause(text: unknown): { cause: string; by: string | null } | null {
   if (!s) return null;
   if (/ipecac/i.test(s)) return { cause: "ipecac", by: null };
   if (/transfusion|hemolytic|haemolytic/i.test(s)) return { cause: "blood", by: null };
+  const od = s.match(/^overdosed on\s+(.+)$/i);
+  if (od) return { cause: "overdose", by: od[1].slice(0, 40) };
   const m = s.match(/^(mugged by|attacked by|hospitali[sz]ed by|lost to)\s*(.*)$/i);
   if (m) {
     const verb = m[1].toLowerCase();

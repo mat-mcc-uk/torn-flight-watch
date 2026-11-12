@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Flight Watch
 // @namespace    mcc.torn.ukwatch
-// @version      1.14.1
+// @version      1.14.2
 // @description  Watches the factions you're at war with, shows which countries are safe or risky, and alerts when enemies fly to, land in, or leave the country you're in or heading to.
 // @author       Ripcorder [4252513]
 // @match        https://www.torn.com/*
@@ -85,7 +85,7 @@
   const SERVER_KEY = 'sb_publishable_TZNmF4f4b2bWSC5zuUCqLQ_f5c3EYQf'; // publishable, safe to ship
   const SERVER_TOKEN = '6d975e385dde1a96370823b2';
 
-  const VERSION = '1.14.1'; // keep in step with @version so the panel shows what's actually running
+  const VERSION = '1.14.2'; // keep in step with @version so the panel shows what's actually running
   const TAB_ID = Math.random().toString(36).slice(2);
   const LEADER_TTL = 20;   // seconds before another tab takes over polling
   const WAR_CHECK = 300;   // seconds between war lookups in auto enemy mode
@@ -263,6 +263,8 @@
     if (!s) return null;
     if (/ipecac/i.test(s)) return { cause: 'ipecac', by: null };
     if (/transfusion|hemolytic|haemolytic/i.test(s)) return { cause: 'blood', by: null };
+    const od = s.match(/^overdosed on\s+(.+)$/i);
+    if (od) return { cause: 'overdose', by: od[1].slice(0, 40) };
     const m = s.match(/^(mugged by|attacked by|hospitali[sz]ed by|lost to)\s*(.*)$/i);
     if (m) {
       const verb = m[1].toLowerCase();
@@ -272,10 +274,12 @@
     return { cause: 'other', by: s.slice(0, 80) };
   }
   const SELF_HOSP = { ipecac: 'Ipecac', blood: 'blood bag' };
-  // Short label: "self-hosp (Ipecac)", "mugged by X", "hospitalised by someone", "lost to X".
+  const hospClass = (cause) => (SELF_HOSP[cause] ? 'self' : cause === 'overdose' ? 'od' : 'hit');
+  // Short label: "self-hosp (Ipecac)", "overdose (Xanax)", "mugged by X", "hospitalised by someone", "lost to X".
   function hospLabel(cause, by) {
     if (!cause) return '';
     if (SELF_HOSP[cause]) return `self-hosp (${SELF_HOSP[cause]})`;
+    if (cause === 'overdose') return `overdose${by ? ` (${by})` : ''}`;
     if (cause === 'mugged') return `mugged by ${by || 'someone'}`;
     if (cause === 'lost') return `lost to ${by || 'someone'}`;
     if (cause === 'attacked') return `hospitalised by ${by || 'someone'}`;
@@ -1008,6 +1012,7 @@
     #ukw-panel .tag2.dn{background:#4a3a12;color:#ffe3a0}
     #ukw-panel .tag2.lnd{background:#7a1f1f;color:#fff}
     #ukw-panel .tag2.self{background:#3d3550;color:#d9ccff;margin-left:0}
+    #ukw-panel .tag2.od{background:#4a3a12;color:#ffe3a0;margin-left:0}
     #ukw-panel .tag2.hit{background:#4a2b2b;color:#ffc9c9;margin-left:0}
     #ukw-panel .filters{background:#202329;border:1px solid #31353c;border-radius:6px;padding:6px 8px;margin:4px 0 8px}
     #ukw-panel .filters label{margin-right:8px;white-space:nowrap}
@@ -1184,7 +1189,7 @@
     }
     const note = r.hosp ? `in hosp${r.hospUntil && r.hospUntil > t ? ` ${fmt(r.hospUntil - t)}` : ''}` : 'landed';
     const why = r.hosp && r.hospCause
-      ? `<br><span class="tag2 ${SELF_HOSP[r.hospCause] ? 'self' : 'hit'}">${esc(hospLabel(r.hospCause, r.hospBy))}</span>`
+      ? `<br><span class="tag2 ${hospClass(r.hospCause)}">${esc(hospLabel(r.hospCause, r.hospBy))}</span>`
       : '';
     return `<tr><td>${link}${why}</td><td style="text-align:right" class="muted">${note}</td></tr>`;
   }
@@ -1315,7 +1320,7 @@
         p.donator && '<span class="tag2 dn">donator</span>',
         p.bounty && '<span class="tag2">bounty</span>',
         p.director && '<span class="tag2">director</span>',
-        p.hosp_cause && `<span class="tag2 ${SELF_HOSP[p.hosp_cause] ? 'self' : 'hit'}" style="margin-left:3px">${esc(hospLabel(p.hosp_cause, p.hosp_by))}</span>`,
+        p.hosp_cause && `<span class="tag2 ${hospClass(p.hosp_cause)}" style="margin-left:3px">${esc(hospLabel(p.hosp_cause, p.hosp_by))}</span>`,
         p.landedAt && t - p.landedAt < 900 && `<span class="tag2 lnd">landed ${fmt(t - p.landedAt)} ago</span>`,
       ].filter(Boolean).join('');
       const when = p.kind === 'out'
