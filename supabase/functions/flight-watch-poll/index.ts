@@ -248,6 +248,7 @@ Deno.serve(async (req) => {
           level: m.level,
           state: s.state ?? null,
           description: s.description ?? null,
+          details: s.details ?? null,
           kind: loc.kind,
           country: loc.country,
           plane,
@@ -261,6 +262,16 @@ Deno.serve(async (req) => {
         });
       }
     });
+
+    // Log each new hospital reason once per stay (fresh admission or changed wording).
+    const hospLog = rows
+      .filter((r) => String(r.state ?? "").toLowerCase() === "hospital" && r.details)
+      .filter((r) => prevById.get(Number(r.player_id))?.details !== r.details)
+      .map((r) => ({ details: r.details, id: r.player_id, name: r.name, t }));
+    if (hospLog.length) {
+      const { error } = await db.rpc("flight_watch_log_hosp", { p_rows: hospLog });
+      if (error) console.error("hosp log", error.message);
+    }
 
     if (rows.length) {
       const { error } = await db.from("flight_watch_members").upsert(rows, { onConflict: "player_id" });
